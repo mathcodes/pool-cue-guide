@@ -38,6 +38,119 @@ class AnalysisError(Exception):
     pass
 
 
+# ---------------------------------------------------------------- table finding
+
+def _felt_dist(hsv: np.ndarray, felt) -> np.ndarray:
+    """Distance from the felt colour. Hue and saturation dominate; brightness barely counts,
+    so a lighting vignette (bright middle, dark edges) doesn't look like a different surface."""
+    dh = np.minimum(np.abs(hsv[:, :, 0] - felt[0]), 180 - np.abs(hsv[:, :, 0] - felt[0]))
+    return 2.0 * dh + np.abs(hsv[:, :, 1] - felt[1]) / 2 + 0.15 * np.abs(hsv[:, :, 2] - felt[2])
+
+
+def _coverage_crop(m: np.ndarray, keep: float = 0.8) -> np.ndarray:
+    """Zero out columns/rows that are mostly not felt. Rails with blue patterns survive a colour test but
+    not this: the felt spans the full height/width, a strip of tiles doesn't."""
+    h, w = m.shape
+    col = (m > 0).mean(axis=0)
+    row = (m > 0).mean(axis=1)
+    cbase = float(np.median(col[w // 4: 3 * w // 4]))
+    rbase = float(np.median(row[h // 4: 3 * h // 4]))
+    cx = np.where(col >= keep * cbase)[0]
+    ry = np.where(row >= keep * rbase)[0]
+    if len(cx) == 0 or len(ry) == 0:
+        return m
+    out = np.zeros_like(m)
+    out[ry[0]:ry[-1] + 1, cx[0]:cx[-1] + 1] = m[ry[0]:ry[-1] + 1, cx[0]:cx[-1] + 1]
+    return out
+
+
+def _felt_mask(img: np.ndarray, ref=None):
+    """Mask of the playing surface by hue (not brightness), with holes (balls, markings) filled in.
+    Returns (mask, ref) where ref is the felt's HSV reference taken from the middle of the photo."""
+    h, w = img.shape[:2]
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV).astype(np.float32)
+    if ref is None:
+        mid = hsv[int(h * 0.3):int(h * 0.7), int(w * 0.3):int(w * 0.7)].reshape(-1, 3)
+        ref = np.median(mid, axis=0)
+    dh = np.minimum(np.abs(hsv[:, :, 0] - ref[0]), 180 - np.abs(hsv[:, :, 0] - ref[0]))
+    ok = (dh <= 14) & (hsv[:, :, 1] >= max(40.0, 0.45 * ref[1])) & (hsv[:, :, 2] >= 25)
+    m = ok.astype(np.uint8) * 255
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    m = cv2.morphologyEx(m, cv2.MORPH_OPEN, k, iterations=2)
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, k, iterations=2)
+    big = max(15, int(0.09 * min(h, w))) | 1   # sheds rail patterns and other strips narrower than ~9% of the photo
+    m = cv2.morphologyEx(m, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (big, big)))
+    m = _coverage_crop(m)
+    cnt = v.largest_contour(m)
+    out = np.zeros_like(m)
+    if cnt is not None:
+        cv2.drawContours(out, [cv2.convexHull(cnt)], -1, 255, thickness=cv2.FILLED)
+    return out, ref
+
+
+def _four_corners(mask: np.ndarray):
+    """Corners as the hull points furthest along each diagonal (robust to chamfered pocket corners)."""
+    cnt = v.largest_contour(mask)
+    if cnt is None:
+        return None
+    hull = cv2.convexHull(cnt)
+    pts = hull.reshape(-1, 2).astype(np.float32)
+    rect = cv2.minAreaRect(hull)
+    if cv2.contourArea(hull) >= 0.94 * rect[1][0] * rect[1][1] > 0:
+        # Basically a rectangle (top-down photo or screenshot): rounded corners would skew a diagonal pick.
+        quad = v.order_corners(cv2.boxPoints(rect).astype(np.float32))
+    else:
+        quad = v.order_corners(pts)  # angled photo: TL, TR, BR, BL via sum/diff extremes over ALL hull points
+    top, right = np.linalg.norm(quad[1] - quad[0]), np.linalg.norm(quad[2] - quad[1])
+    if top < right:              # portrait: make the long side the "top" so the warp isn't stretched
+        quad = np.roll(quad, -1, axis=0)
+    return quad
+
+
+PAD = 0.07  # grow the outline so the cushions and pockets are inside the rectified image
+
+
+def _find_table(src: np.ndarray):
+    mask, ref = _felt_mask(src)
+    if (mask > 0).mean() < 0.12:
+        return None, None, None
+    quad = _four_corners(mask)
+    if quad is None:
+        return None, None, None
+    c = quad.mean(axis=0)
+    return (c + (quad - c) * (1 + PAD)).astype(np.float32), ref, quad
+
+
+def _pockets(rect: np.ndarray, mask: np.ndarray) -> list:
+    """Six pockets: the felt outline's corners and long-side midpoints, snapped to the nearest dark blob."""
+    h, w = mask.shape
+    ys, xs = np.where(mask > 0)
+    if len(xs) == 0:
+        return []
+    x0, x1 = float(np.percentile(xs, 0.5)), float(np.percentile(xs, 99.5))
+    y0, y1 = float(np.percentile(ys, 0.5)), float(np.percentile(ys, 99.5))
+    push = 0.012 * w
+    anchors = [(x0 - push, y0 - push), (x1 + push, y0 - push), (x1 + push, y1 + push), (x0 - push, y1 + push),
+               ((x0 + x1) / 2, y0 - push), ((x0 + x1) / 2, y1 + push)]
+    dark = (cv2.cvtColor(rect, cv2.COLOR_BGR2HSV)[:, :, 2] < 70).astype(np.uint8)
+    out = []
+    for ax, ay in anchors:
+        wx, wy = int(0.07 * w), int(0.12 * h)
+        xa, xb = int(max(0, ax - wx)), int(min(w, ax + wx))
+        ya, yb = int(max(0, ay - wy)), int(min(h, ay + wy))
+        n, lab, stats, cent = cv2.connectedComponentsWithStats(dark[ya:yb, xa:xb])
+        best = None
+        for i in range(1, n):
+            if stats[i, cv2.CC_STAT_AREA] < 0.0004 * w * h:
+                continue
+            cx, cy = cent[i][0] + xa, cent[i][1] + ya
+            d = math.hypot(cx - ax, cy - ay)
+            if best is None or d < best[0]:
+                best = (d, cx, cy)
+        out.append(np.array([best[1], best[2]] if best else [ax, ay], dtype=np.float32))
+    return out
+
+
 # ---------------------------------------------------------------- analyze
 
 def decode_image(data: bytes) -> np.ndarray:
@@ -65,51 +178,93 @@ def _assign_ids(sess: Session, balls: list) -> None:
             sess.next_id += 1
 
 
-def _blob_balls(rect, mask, felt, pockets, known, R, thr: float = 38) -> list:
-    """Colour-distance-from-felt blobs: finds green/red/blue balls that grayscale Hough misses."""
+def _blob_balls(rect, mask, felt, pockets, known, R, thr: float = 38, max_add: int = 99) -> list:
+    """Colour-blobs that differ from the felt (hue/saturation, not brightness): finds balls Hough misses."""
     h, w = rect.shape[:2]
     hsv = cv2.cvtColor(rect, cv2.COLOR_BGR2HSV).astype(np.float32)
-    dh = np.minimum(np.abs(hsv[:, :, 0] - felt[0]), 180 - np.abs(hsv[:, :, 0] - felt[0]))
-    d = 2.0 * dh + np.abs(hsv[:, :, 1] - felt[1]) / 2 + np.abs(hsv[:, :, 2] - felt[2]) / 3
+    d = _felt_dist(hsv, felt)
     blob = ((d > thr) & (mask > 0)).astype(np.uint8) * 255
     k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     blob = cv2.morphologyEx(blob, cv2.MORPH_OPEN, k, iterations=2)
-    out = []
+    cands = []
     cnts, _ = cv2.findContours(blob, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     for c in cnts:
         area = cv2.contourArea(c)
-        if not (0.55 * math.pi * R * R <= area <= 1.5 * math.pi * R * R):
+        if not (0.6 * math.pi * R * R <= area <= 1.4 * math.pi * R * R):
             continue
         (x, y), r = cv2.minEnclosingCircle(c)
-        if area < 0.7 * math.pi * r * r:
-            continue  # not round: a smudge, a merged pair or a rail edge
+        if area < 0.78 * math.pi * r * r:
+            continue  # not round: a line, a smudge, or a merged pair
+        bw, bh = cv2.boundingRect(c)[2:]
+        if max(bw, bh) > 1.35 * min(bw, bh):
+            continue  # thin or stretched
         if x - r < 0 or y - r < 0 or x + r >= w or y + r >= h:
             continue
         if any(math.hypot(x - p[0], y - p[1]) < 1.6 * R for p in pockets):
             continue
         if any(math.hypot(x - b.center[0], y - b.center[1]) < 1.2 * R for b in known):
             continue
-        out.append(v.Ball(center=np.array([x, y], dtype=np.float32), radius=float(r),
-                          mean_bgr=_patch_mean(rect, int(x), int(y), int(r))))
-    return out
+        cands.append((area / (math.pi * r * r), x, y, r))
+    cands.sort(reverse=True)  # roundest first
+    return [v.Ball(center=np.array([x, y], dtype=np.float32), radius=float(r),
+                   mean_bgr=_patch_mean(rect, int(x), int(y), int(r))) for _, x, y, r in cands[:max_add]]
+
+
+def _on_felt(rect, felt, balls: list, need: float = 0.45) -> list:
+    """Keep balls with felt around them. A real ball sits on cloth (or a cushion, which is cloth-coloured);
+    rail ornaments and tiles don't."""
+    if not balls:
+        return balls
+    hsv = cv2.cvtColor(rect, cv2.COLOR_BGR2HSV).astype(np.float32)
+    felt_px = (_felt_dist(hsv, felt) < 34).astype(np.uint8)
+    h, w = felt_px.shape
+    keep = []
+    for b in balls:
+        x, y, r = int(b.center[0]), int(b.center[1]), float(b.radius)
+        ring = np.zeros((h, w), np.uint8)
+        cv2.circle(ring, (x, y), int(r * 1.7), 1, -1)
+        cv2.circle(ring, (x, y), int(r * 1.15), 0, -1)
+        n = int(ring.sum())
+        if n and float((felt_px & ring).sum()) / n >= need:
+            keep.append(b)
+    return keep
+
+
+def _inside_play(mask: np.ndarray, R: float, balls: list) -> list:
+    """A ball centre is at least one radius inside the table outline."""
+    k = max(3, int(R)) * 2 + 1
+    play = cv2.erode(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    h, w = play.shape
+    return [b for b in balls if 0 <= int(b.center[1]) < h and 0 <= int(b.center[0]) < w
+            and play[int(b.center[1]), int(b.center[0])] > 0]
 
 
 def analyze(data: bytes) -> Session:
     src = decode_image(data)
-    corners = v.find_table_corners(src)
+    corners, ref, inner_quad = _find_table(src)
     if corners is None:
         raise AnalysisError(
             "Couldn't find the table. Take the photo from above with the whole felt in view and even lighting."
         )
-    rect, _ = v.warp_to_topdown(src, corners, target_short=900)
-    mask = v.detect_table_mask(rect)
-    pockets = v.detect_pockets(rect, mask)
+    rect, H = v.warp_to_topdown(src, corners, target_short=900)
+    mask, _ = _felt_mask(rect, ref)
+    # Balls live on the felt and cushions, never on the rails: keep only the un-padded table outline.
+    inner = np.zeros_like(mask)
+    cv2.fillConvexPoly(inner, cv2.perspectiveTransform(inner_quad[None].astype(np.float32), H)[0].astype(np.int32), 255)
+    mask = cv2.bitwise_and(mask, inner)
+    pockets = _pockets(rect, mask)
     balls = v.detect_balls(rect, mask)
+    if len(balls) >= 4:
+        med = float(np.median([b.radius for b in balls]))
+        balls = [b for b in balls if 0.75 * med <= b.radius <= 1.3 * med]
+    balls = [b for b in balls if not any(math.hypot(b.center[0] - p[0], b.center[1] - p[1]) < 1.6 * b.radius for p in pockets)]
     felt = _felt_hsv(rect, mask)
     if felt[1] < 35:
         raise AnalysisError("That doesn't look like a pool table (no felt colour found). Try another photo.")
     R0 = float(np.median([b.radius for b in balls])) if balls else 0.025 * rect.shape[1]
     balls += _blob_balls(rect, mask, felt, pockets, balls, R0)
+    balls = _on_felt(rect, felt, balls)
+    balls = _inside_play(mask, R0, balls)
     v.classify_balls(rect, balls)
     if len(balls) < 2:
         raise AnalysisError("Couldn't find the balls. Use a sharper, brighter photo from above.")
@@ -162,9 +317,7 @@ def _local_redetect(sess: Session, b) -> bool:
 
     # Fallback: the non-felt blob nearest to the old centre.
     hsv = cv2.cvtColor(rect[y0:y1, x0:x1], cv2.COLOR_BGR2HSV).astype(np.float32)
-    f = sess.felt_hsv
-    dh = np.minimum(np.abs(hsv[:, :, 0] - f[0]), 180 - np.abs(hsv[:, :, 0] - f[0]))
-    d = 2.0 * dh + np.abs(hsv[:, :, 1] - f[1]) / 2 + np.abs(hsv[:, :, 2] - f[2]) / 3
+    d = _felt_dist(hsv, sess.felt_hsv)
     blob = (d > 40).astype(np.uint8) * 255
     blob = cv2.morphologyEx(blob, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     cnts, _ = cv2.findContours(blob, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -190,30 +343,16 @@ def _local_redetect(sess: Session, b) -> bool:
 
 
 def _rescan(sess: Session) -> int:
-    """Looser global pass that only adds balls not already known or suppressed."""
-    rect, mask = sess.rect, sess.table_mask
-    h, w = rect.shape[:2]
-    gray = cv2.medianBlur(cv2.cvtColor(rect, cv2.COLOR_BGR2GRAY), 5)
-    R = float(np.median([b.radius for b in sess.balls])) if sess.balls else 0.025 * w
-    p2 = max(8, 20 - 3 * (sess.round + 1))
-    cs = cv2.HoughCircles(gray, cv2.HOUGH_GRADIENT, dp=1.2, minDist=int(R * 1.8), param1=100, param2=p2,
-                          minRadius=int(R * 0.8), maxRadius=int(R * 1.25))
-    added = []
-    if cs is not None:
-        for x, y, r in np.round(cs[0]).astype(int):
-            if x - r < 0 or y - r < 0 or x + r >= w or y + r >= h or mask[y, x] == 0:
-                continue
-            if any(math.hypot(x - b.center[0], y - b.center[1]) < 1.5 * R for b in sess.balls):
-                continue
-            if any(math.hypot(x - sx, y - sy) < sr for sx, sy, sr in sess.suppressed):
-                continue
-            nb = v.Ball(center=np.array([x, y], dtype=np.float32), radius=float(r), mean_bgr=_patch_mean(rect, x, y, int(r)))
-            added.append(nb)
-    extra = [b for b in _blob_balls(rect, mask, sess.felt_hsv, sess.pockets, sess.balls + added, R, thr=max(20, 30 - 4 * sess.round))
+    """Looser colour-blob pass that only adds round, ball-sized objects not already known or removed.
+    Capped per pass so a pattern on the cloth can't flood the list."""
+    R = float(np.median([b.radius for b in sess.balls])) if sess.balls else 0.025 * sess.rect.shape[1]
+    thr = max(26, 34 - 3 * sess.round)
+    found = _blob_balls(sess.rect, sess.table_mask, sess.felt_hsv, sess.pockets, sess.balls, R, thr=thr, max_add=3)
+    found = _inside_play(sess.table_mask, R, _on_felt(sess.rect, sess.felt_hsv, found))
+    found = [b for b in found
              if not any(math.hypot(b.center[0] - sx, b.center[1] - sy) < sr for sx, sy, sr in sess.suppressed)]
-    added += extra
-    sess.balls.extend(added)
-    return len(added)
+    sess.balls.extend(found)
+    return len(found)
 
 
 def refine(sess: Session, improve: list[str], remove: list[str], find_missing: bool = False) -> dict:

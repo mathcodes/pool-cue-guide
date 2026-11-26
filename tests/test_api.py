@@ -44,3 +44,18 @@ def test_bad_inputs():
     assert c.get("/api/sessions/zzz").status_code == 404
     flat = cv2.imencode(".jpg", np.full((400, 600, 3), 90, np.uint8))[1].tobytes()
     assert c.post("/api/sessions", files={"file": ("f.jpg", flat, "image/jpeg")}).status_code == 422
+
+
+def test_game_screenshot_whole_table():
+    """Regression: vignetted felt + patterned rails used to crop the table, miss pockets and flood rescans with junk."""
+    data = open(pathlib.Path(__file__).parent / "fixtures" / "game_table.jpg", "rb").read()
+    st = c.post("/api/sessions", files={"file": ("g.jpg", data, "image/jpeg")}).json()
+    assert len(st["balls"]) == 15                      # 15 real balls, nothing on the rails
+    assert {b["label"] for b in st["balls"]} >= {"cue", "eight"}
+    sid = st["id"]
+    for _ in range(3):                                 # repeated rescans must not invent balls
+        j = c.post(f"/api/sessions/{sid}/review", json={"find_missing": True}).json()
+    assert len(j["balls"]) == 15
+    assert 1.6 < st["width"] / st["height"] < 2.3      # table kept whole, not cropped
+    a = c.post(f"/api/sessions/{sid}/approve", json={"group": "open"}).json()
+    assert len(a["options"]) == 3
