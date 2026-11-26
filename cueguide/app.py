@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Optional
@@ -13,6 +14,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import engine, randomtable
+
+log = logging.getLogger('cueguide')
 
 MAX_UPLOAD = 12 * 1024 * 1024
 MAX_SESSIONS = 20
@@ -215,7 +218,11 @@ def approve(sid: str, body: Approve):
     s = _ready(_get(sid))
     if not any(b.label == "cue" for b in s.balls):
         raise HTTPException(409, "No cue ball is marked. Improve or add the cue ball first.")
-    shots = engine.top_shots(s, body.group)
+    try:
+        shots = engine.top_shots(s, body.group)
+    except Exception:  # never leave the user hanging on a spinner: report it
+        log.exception("top_shots failed")
+        raise HTTPException(500, "Could not work out shots for this layout. Try Back to review and adjust a ball.")
     OPTIONS[sid] = shots
     GROUPS[sid] = body.group
     return _state(s, {"approved": True, "group": body.group, "options": shots})

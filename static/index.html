@@ -51,10 +51,34 @@ td input[type=checkbox]{width:20px;height:20px}
 .railgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px;margin-top:12px}
 .rcard{border:1px solid var(--line);border-radius:12px;padding:12px}.rcard h3{margin:0 0 6px;font-size:15px}
 .rcard svg.tbl{width:100%;height:auto;display:block;margin:6px 0;border-radius:8px}.rcard ol,.rcard ul{margin:6px 0;padding-left:18px}.rcard li{margin:3px 0}
+
+button{transition:transform .07s ease,box-shadow .07s ease,filter .15s;box-shadow:0 3px 0 rgba(0,0,0,.4);position:relative}
+button.sec{box-shadow:0 3px 0 var(--line)}
+button:hover:not(:disabled){filter:brightness(1.1)}
+button:active:not(:disabled){transform:translateY(3px);box-shadow:0 0 0 transparent}
+.seg button,.seg button.sec{box-shadow:none;border-radius:0}
+.seg button:active:not(:disabled){transform:translateY(2px)}
+button:focus-visible{outline:3px solid #8af0b8;outline-offset:2px}
+#bar{position:fixed;top:0;left:0;right:0;height:3px;z-index:99;opacity:0;transition:opacity .2s;overflow:hidden;pointer-events:none}
+#bar::before{content:"";position:absolute;top:0;bottom:0;width:35%;background:linear-gradient(90deg,transparent,#34c27a,#8af0b8,transparent);animation:slide 1.1s ease-in-out infinite}
+#bar.on{opacity:1}
+@keyframes slide{0%{left:-35%}100%{left:100%}}
+@keyframes spin{to{transform:rotate(360deg)}}
+button.busy{pointer-events:none;filter:brightness(.9)}
+button.busy::after{content:"";display:inline-block;width:12px;height:12px;margin-left:8px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:spin .7s linear infinite;vertical-align:-2px}
+.railwrap{display:grid;gap:16px;margin-top:12px}@media(min-width:900px){.railwrap{grid-template-columns:1.7fr 1fr}}
+.raillist{display:grid;gap:6px;margin-top:10px;max-height:560px;overflow:auto}
+.raillist button{text-align:left;font-weight:500;font-size:14px;padding:8px 10px}
+.raillist button[aria-current=true]{background:var(--acc);color:#04170d;border-color:var(--acc)}
+#railStage svg.tbl{width:100%;height:auto;display:block;border-radius:10px}
+.railtxt ol,.railtxt ul{margin:8px 0;padding-left:20px}.railtxt li{margin:4px 0}
+#toast{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);background:#7f1d1d;color:#fff;padding:10px 16px;border-radius:10px;z-index:100;max-width:90vw;box-shadow:0 6px 20px rgba(0,0,0,.4)}
 </style>
 </head>
 <body>
-<header><h1>🎱 Pool Cue Guide</h1><span class="mut">Upload a photo of the table, check the balls, approve, get 3 shot options.</span></header>
+<div id="toast" role="alert" hidden></div>
+<div id="bar" role="progressbar" aria-label="Working"></div>
+<header><h1>🎱 Pool Cue Guide</h1><span class="mut">Upload a photo of the table, check the balls, approve, get 3 shot options.</span><span style="margin-left:auto" class="row"><button id="rand" class="sec" type="button">🎲 Random</button><button id="rails" class="sec" type="button">📐 Rails</button></span></header>
 <main>
 
 <section class="panel" id="upload">
@@ -63,8 +87,8 @@ td input[type=checkbox]{width:20px;height:20px}
     <p class="mut">From above if you can, whole felt in view, even light. JPG or PNG, up to 12 MB.</p>
     <p class="mut"><b>Best results:</b> cover the six pockets with bright green (neon) discs, <i>or</i> tap the pockets and balls yourself after uploading.</p>
     <input id="file" type="file" accept="image/*" capture="environment">
-    <p><button id="go" disabled>Analyze photo</button> <span class="mut">or</span> <button id="rand" class="sec" type="button">🎲 Random table</button> <button id="rails" class="sec" type="button">📐 Rails</button></p>
-    <p class="mut">Random makes up a practice table with randomly placed balls so you can try the app. You can remove and add balls afterwards.</p>
+    <p><button id="go" disabled>Analyze photo</button></p>
+    <p class="mut">No photo handy? Press <b>🎲 Random</b> (top right) for a practice table with random balls you can edit, or <b>📐 Rails</b> for rail-shot examples.</p>
     <p id="uerr" class="err" role="alert"></p>
   </div>
 </section>
@@ -74,8 +98,6 @@ td input[type=checkbox]{width:20px;height:20px}
     <div class="row" role="tablist" style="margin-bottom:10px">
       <button class="sec tab" id="tabAuto" role="tab" aria-selected="true" type="button">Detected view</button>
       <button class="sec tab" id="tabTap" role="tab" aria-selected="false" type="button">✋ Tap to place</button>
-      <button class="sec" id="rand2" type="button" hidden>🎲 New random table</button>
-      <button class="sec" id="rails2" type="button" hidden>📐 Rails</button>
     </div>
 
     <div id="autoStage">
@@ -129,10 +151,19 @@ td input[type=checkbox]{width:20px;height:20px}
 
 <section class="panel" id="railsSec" hidden>
   <div class="row" style="justify-content:space-between"><h2 style="margin:0;font-size:17px">📐 Rail shots and diamond systems</h2><button class="sec" id="railsBack" type="button">← Back</button></div>
-  <p class="mut">Stored examples, ready to use anytime. Paths are exact equal-angle (no spin) reflections on a 9 ft table; the diamonds are numbered along the long rail (1 to 7) and short rail (1 to 3). Tables, cloth and spin move the real result, so test on your table.</p>
-  <div class="seg" id="railFilter" role="radiogroup" aria-label="Filter"></div>
-  <div id="railGrid" class="railgrid"></div>
-  <p class="mut" id="railSrc"></p>
+  <p class="mut">Pick a shot on the right. Paths are exact equal-angle (no spin) reflections on a 9 ft table; diamonds are numbered along the long rail (1 to 7) and short rail (1 to 3). Real results move with the table, cloth and spin, so test on yours.</p>
+  <div class="railwrap">
+    <div class="railmain">
+      <h3 id="railTitle" style="margin:0 0 8px"></h3>
+      <div id="railStage"></div>
+      <div id="railText" class="railtxt"></div>
+      <div class="row" style="margin-top:10px"><button class="sec" id="railPrev" type="button">← Previous</button><button class="sec" id="railNext" type="button">Next →</button><span class="mut" id="railPos"></span></div>
+    </div>
+    <aside>
+      <div class="seg" id="railFilter" role="radiogroup" aria-label="Filter"></div>
+      <div id="railList" class="raillist"></div>
+    </aside>
+  </div>
 </section>
 
 <section class="panel" id="results" hidden>
@@ -148,6 +179,12 @@ td input[type=checkbox]{width:20px;height:20px}
 
 <script>
 const $=s=>document.querySelector(s);
+/* progress: thin animated bar + spinner on the clicked button while any request is running */
+const _fetch=window.fetch.bind(window);let inflight=0;
+window.fetch=async(...a)=>{inflight++;$('#bar').classList.add('on');
+  try{return await _fetch(...a)}finally{inflight--;if(!inflight){$('#bar').classList.remove('on');document.querySelectorAll('button.busy').forEach(b=>b.classList.remove('busy'))}}};
+let _tt;function toast(m){const t=$('#toast');t.textContent=m;t.hidden=false;clearTimeout(_tt);_tt=setTimeout(()=>t.hidden=true,7000)}
+document.addEventListener('click',e=>{const b=e.target.closest('button');if(!b||b.disabled)return;setTimeout(()=>{if(inflight>0)b.classList.add('busy')},0)},true);
 let grp='open';
 const SEGS=[['open','Open table'],['solid','Solids (1–7)'],['stripe','Stripes (9–15)']];
 let played=0;
@@ -178,18 +215,19 @@ async function newRandom(){
     sid=j.id;st=j;entries=new Map();pts=j.items||[];sel=-1;opt=0;opts=[];played=0;
     $('#upload').hidden=true;$('#results').hidden=true;$('#review').hidden=false;$('#stagehint').hidden=false;
     $('#review').insertBefore($('#leftpanel'),$('#review').firstChild);$('#tabAuto').parentElement.hidden=false;
-    $('#rand2').hidden=false;$('#rails2').hidden=false;show();setView('auto');
+    show();setView('auto');
     $('#rep').textContent='Random practice table. To remove balls tick Remove and Re-run, or open Tap to place to delete and add balls, then Build.';
     $('#rep').className='mut';
-  }catch(e){$('#uerr').textContent=e.message}
+  }catch(e){$('#uerr').textContent=e.message;toast(e.message)}
 }
-$('#rand').onclick=newRandom;$('#rand2').onclick=newRandom;
+$('#rand').onclick=newRandom;
 
 
 /* ---------- rails library ---------- */
 let railsData=null, railsFrom=[], railFilter='all';
 const CATS=[['all','All'],['kick','Kicks'],['bank','Banks'],['system','Systems'],['spin','Spin & speed']];
 function tableSvg(t){
+  t=t||{object:null,cue:null,pocket:null,path:[],contacts:[]};
   const o=t.object,c=t.cue,pk=t.pocket;
   const dia=[];for(let i=1;i<8;i++)if(i!==4){dia.push([i,-0.24],[i,4.24])}for(let j=1;j<4;j++)dia.push([-0.24,j],[8.24,j]);
   let g=`<svg class="tbl" viewBox="-0.75 -0.85 9.5 5.7" role="img" aria-label="Rail shot diagram">
@@ -201,29 +239,35 @@ function tableSvg(t){
   for(let i=1;i<8;i++)if(i!==4)g+=`<text x="${i}" y="-0.58" font-size=".28" text-anchor="middle" fill="currentColor">${i}</text>`;
   for(let j=1;j<4;j++)g+=`<text x="-0.62" y="${j+.1}" font-size=".28" text-anchor="middle" fill="currentColor">${j}</text>`;
   if(pk)g+=`<circle cx="${pk[0]}" cy="${pk[1]}" r=".3" fill="none" stroke="#22c55e" stroke-width=".07"/>`;
-  g+=`<polyline points="${t.path.map(p=>p.join(',')).join(' ')}" fill="none" stroke="#fff" stroke-width=".07" stroke-dasharray=".02 .17" stroke-linecap="round"/>`;
-  const last=t.path.length-1,a=t.path[last-1],b=t.path[last],dx=b[0]-a[0],dy=b[1]-a[1],L=Math.hypot(dx,dy)||1,ux=dx/L,uy=dy/L;
-  g+=`<polygon points="${b[0]},${b[1]} ${b[0]-ux*.3-uy*.14},${b[1]-uy*.3+ux*.14} ${b[0]-ux*.3+uy*.14},${b[1]-uy*.3-ux*.14}" fill="#fff"/>`;
+  if(t.path.length>1)g+=`<polyline points="${t.path.map(p=>p.join(',')).join(' ')}" fill="none" stroke="#fff" stroke-width=".07" stroke-dasharray=".02 .17" stroke-linecap="round"/>`;
+  if(t.path.length>1){const last=t.path.length-1,a=t.path[last-1],b=t.path[last],dx=b[0]-a[0],dy=b[1]-a[1],L=Math.hypot(dx,dy)||1,ux=dx/L,uy=dy/L;
+  g+=`<polygon points="${b[0]},${b[1]} ${b[0]-ux*.3-uy*.14},${b[1]-uy*.3+ux*.14} ${b[0]-ux*.3+uy*.14},${b[1]-uy*.3-ux*.14}" fill="#fff"/>`;}
   t.contacts.forEach(k=>{g+=`<circle cx="${k.x}" cy="${k.y}" r=".1" fill="#ef2d2d"/>`;
     const ty=k.y<=0.01?k.y+.42:k.y>=3.99?k.y-.3:k.y, tx=k.x<=0.01?k.x+.38:k.x>=7.99?k.x-.38:k.x;
     g+=`<text x="${tx}" y="${ty+.08}" font-size=".3" font-weight="700" text-anchor="middle" fill="#fff" stroke="#000" stroke-width=".04" paint-order="stroke">${k.label}</text>`});
   if(c)g+=`<circle cx="${c[0]}" cy="${c[1]}" r=".14" fill="#fff" stroke="#111" stroke-width=".04"/><text x="${c[0]}" y="${c[1]-.22}" font-size=".26" text-anchor="middle" fill="#fff" stroke="#000" stroke-width=".04" paint-order="stroke">cue</text>`;
-  g+=`<circle cx="${o[0]}" cy="${o[1]}" r=".14" fill="#f59e0b" stroke="#111" stroke-width=".04"/><text x="${o[0]}" y="${o[1]-.22}" font-size=".26" text-anchor="middle" fill="#fff" stroke="#000" stroke-width=".04" paint-order="stroke">${c?'object':'ball'}</text>`;
+  if(o)g+=`<circle cx="${o[0]}" cy="${o[1]}" r=".14" fill="#f59e0b" stroke="#111" stroke-width=".04"/><text x="${o[0]}" y="${o[1]-.22}" font-size=".26" text-anchor="middle" fill="#fff" stroke="#000" stroke-width=".04" paint-order="stroke">${c?'object':'ball'}</text>`;
   return g+'</svg>';
 }
+let railId=null;
+function railItems(){return railsData.shots.filter(x=>railFilter==='all'||x.category===railFilter)}
 function drawRails(){
   const f=$('#railFilter');f.innerHTML='';
   CATS.forEach(([k,l])=>{const b=document.createElement('button');b.type='button';b.textContent=l;b.setAttribute('role','radio');b.setAttribute('aria-checked',railFilter===k);
-    b.onclick=()=>{railFilter=k;drawRails()};f.append(b)});
-  const grid=$('#railGrid');grid.innerHTML='';
-  railsData.shots.filter(s=>railFilter==='all'||s.category===railFilter).forEach(s=>{
-    const d=document.createElement('article');d.className='rcard';
-    const src=s.sources.map(k=>`<a href="${railsData.sources[k].url}" target="_blank" rel="noopener">${railsData.sources[k].title}</a>`).join(' · ');
-    d.innerHTML=`<h3>${s.title}</h3>${s.table?tableSvg(s.table):''}<div>${s.summary}</div>
-      <ol>${s.how.map(x=>'<li>'+x+'</li>').join('')}</ol><ul>${s.tips.map(x=>'<li>'+x+'</li>').join('')}</ul>
-      <div class="mut" style="font-size:12px">Sources: ${src}</div>`;
-    grid.append(d);
-  });
+    b.onclick=()=>{railFilter=k;const it=railItems();if(!it.some(x=>x.id===railId))railId=it[0].id;drawRails()};f.append(b)});
+  const items=railItems();if(!railId||!items.some(x=>x.id===railId))railId=items[0].id;
+  const list=$('#railList');list.innerHTML='';
+  items.forEach(x=>{const b=document.createElement('button');b.type='button';b.className='sec';b.textContent=x.title;
+    b.setAttribute('aria-current',x.id===railId);b.onclick=()=>{railId=x.id;drawRails()};list.append(b)});
+  const i=items.findIndex(x=>x.id===railId),s=items[i];
+  $('#railTitle').textContent=s.title;
+  $('#railStage').innerHTML=tableSvg(s.table);
+  const src=s.sources.map(k=>`<a href="${railsData.sources[k].url}" target="_blank" rel="noopener">${railsData.sources[k].title}</a>`).join(' · ');
+  const contacts=s.table&&s.table.contacts.length?`<p><b>Contact points on this diagram:</b> ${s.table.contacts.map(c=>'diamond '+c.label+' ('+(c.rail==='T'||c.rail==='B'?'long':'short')+' rail)').join(', then ')}.</p>`:'';
+  $('#railText').innerHTML=`<p>${s.summary}</p>${contacts}<b>How to use it</b><ol>${s.how.map(x=>'<li>'+x+'</li>').join('')}</ol><b>Tips</b><ul>${s.tips.map(x=>'<li>'+x+'</li>').join('')}</ul><div class="mut" style="font-size:13px">Sources: ${src}</div>`;
+  $('#railPos').textContent=`${i+1} of ${items.length}`;
+  $('#railPrev').onclick=()=>{railId=items[(i+items.length-1)%items.length].id;drawRails()};
+  $('#railNext').onclick=()=>{railId=items[(i+1)%items.length].id;drawRails()};
 }
 async function openRails(){
   if(!railsData){const r=await fetch('/api/rails');railsData=await r.json()}
@@ -231,7 +275,7 @@ async function openRails(){
   ['upload','review','results'].forEach(id=>$('#'+id).hidden=true);
   $('#railsSec').hidden=false;drawRails();window.scrollTo({top:0});
 }
-$('#rails').onclick=openRails;$('#rails2').onclick=openRails;
+$('#rails').onclick=openRails;
 $('#railsBack').onclick=()=>{$('#railsSec').hidden=true;railsFrom.forEach(id=>$('#'+id).hidden=false);if(!railsFrom.length)$('#upload').hidden=false};
 
 /* ---------- views ---------- */
@@ -297,7 +341,8 @@ function drawEntries(){
 }
 async function post(path,body){
   const r=await fetch(`/api/sessions/${sid}/${path}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-  const j=await r.json();if(!r.ok)throw new Error(j.detail||'Request failed');return j;
+  let j={};try{j=await r.json()}catch(_){}
+  if(!r.ok)throw new Error(j.detail||('Request failed ('+r.status+')'));return j;
 }
 function say(rep){
   const p=[];
@@ -336,7 +381,7 @@ async function approve(stay){
     st=j;opts=j.options;opt=opts.length?1:0;
     $('#review').hidden=true;$('#results').hidden=false;$('#stagehint').hidden=true;drawOpts();refresh();
     if(!stay)$('#stage').scrollIntoView({behavior:'smooth'});
-  }catch(e){$('#aerr').textContent=e.message}
+  }catch(e){$('#aerr').textContent=e.message;toast(e.message)}
 }
 $('#approve').onclick=()=>approve(false);
 drawSegs();
@@ -370,11 +415,11 @@ async function playShot(n){
     st=j;opts=j.options;opt=opts.length?1:0;played=j.played||0;
     $('#playnote').textContent=(j.report&&j.report.potted.length?`Potted ${j.report.potted.join(', ')}. `:'Played. ')+`Shot ${played}. `+(j.note||'');
     show();drawOpts();refresh();$('#stage').scrollIntoView({behavior:'smooth'});
-  }catch(e){$('#playnote').textContent=e.message}
+  }catch(e){$('#playnote').textContent=e.message;toast(e.message)}
 }
 async function undoShot(){
   try{const j=await post('undo',{});st=j;opts=j.options;opt=opts.length?1:0;played=j.played||0;$('#playnote').textContent='Undid the last shot.';show();drawOpts();refresh()}
-  catch(e){$('#playnote').textContent=e.message}
+  catch(e){$('#playnote').textContent=e.message;toast(e.message)}
 }
 function drawOpts(){
   $('#undo').hidden=!played;
@@ -384,7 +429,7 @@ function drawOpts(){
   if(!opts.length)box.innerHTML='<p class="mut">No clear shot found. Try Back to review and fix any wrong balls.</p>';
   opts.forEach((o,i)=>{
     const d=document.createElement('div');d.className='opt'+(opt===i+1?' on':'');d.tabIndex=0;
-    d.innerHTML=`<div class="optrow"><div class="cut">${cutSvg(o.cut)}</div><div class="optbody"><b>#${o.rank} ${o.kind==='defense'?'🛡 Safety':'🎯 Pot'}</b> <span class="chip">rating ${o.rating}</span><div>${o.summary}</div>${(o.effects&&o.effects.length)?'<ul class="fx">'+o.effects.map(x=>'<li>'+x+'</li>').join('')+'</ul>':''}<button class="playbtn" type="button">▶ Play this shot</button></div></div>`;
+    d.innerHTML=`<div class="optrow"><div class="cut">${cutSvg(o.cut)}</div><div class="optbody"><b>#${o.rank} ${o.kind==='defense'?'🛡 Safety':'🎯 Pot'}</b> <span class="chip">rating ${o.rating}</span><div>${o.summary}</div>${(o.effects&&o.effects.length)?'<ul class="fx">'+o.effects.map(x=>'<li>'+x+'</li>').join('')+'</ul>':''}<button class="playbtn" type="button">Shoot</button></div></div>`;
     d.querySelector('.playbtn').onclick=ev=>{ev.stopPropagation();playShot(i+1)};
     const pick=()=>{opt=i+1;drawOpts();refresh()};
     d.onclick=pick;d.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();pick()}};

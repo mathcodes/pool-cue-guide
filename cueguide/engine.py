@@ -1023,105 +1023,121 @@ def _bounds(sess, R):
 
 
 def simulate(sess: Session, cue_dir, v0: float, spin: float = 0.0, max_steps: int = 6000) -> dict:
-    """Replay one stroke. Positions in rectified px. spin: >0 follow, 0 stun, <0 draw (cue ball only)."""
+    """Replay one stroke. Positions in rectified px. spin: >0 follow, 0 stun, <0 draw (cue ball only).
+    Plain-float maths on purpose: numpy calls per step made this the slow part of Approve."""
+    hyp = math.hypot
     R = float(np.median([b.radius for b in sess.balls]))
     x0, y0, x1, y1 = _bounds(sess, R)
     cap = 1.5 * max(sess.pocket_r or 0, 1.5 * R)
-    P = [np.array(p, float) for p in sess.pockets]
+    P = [(float(p[0]), float(p[1])) for p in sess.pockets]
     balls = sess.balls
     n = len(balls)
-    pos = np.array([b.center for b in balls], float)
-    vel = np.zeros((n, 2))
+    px = [float(b.center[0]) for b in balls]
+    py = [float(b.center[1]) for b in balls]
+    vx, vy = [0.0] * n, [0.0] * n
     ci = next(i for i, b in enumerate(balls) if b.label == "cue")
-    vel[ci] = _unit(np.array(cue_dir, float)) * v0
+    cd = np.array(cue_dir, float)
+    cd = cd / (np.linalg.norm(cd) + 1e-9)
+    vx[ci], vy[ci] = float(cd[0]) * v0, float(cd[1]) * v0
     alive = [True] * n
     pocket_of = {}
-    paths = [[pos[i].copy()] for i in range(n)]
-    last_rec = pos.copy()
+    paths = [[(px[i], py[i])] for i in range(n)]
+    last = [(px[i], py[i]) for i in range(n)]
     contacts, rails = [], [0] * n
     touched = set()
     spun = False
     sub = max(1, int(math.ceil(v0 / 5.0)))
     dt = 1.0 / sub
-    for step in range(max_steps * sub):
-        mov = [i for i in range(n) if alive[i] and np.linalg.norm(vel[i]) > 1e-3]
+    R2 = 2 * R
+    for _ in range(max_steps * sub):
+        mov = [i for i in range(n) if alive[i] and (vx[i] * vx[i] + vy[i] * vy[i]) > 1e-6]
         if not mov:
             break
         for i in mov:
-            sp = np.linalg.norm(vel[i])
-            vel[i] *= max(0.0, sp - A_ROLL * dt) / sp
-            pos[i] += vel[i] * dt
+            sp = hyp(vx[i], vy[i])
+            k = max(0.0, sp - A_ROLL * dt) / sp
+            vx[i] *= k
+            vy[i] *= k
+            px[i] += vx[i] * dt
+            py[i] += vy[i] * dt
         for i in mov:
-            if not alive[i]:
-                continue
-            for k, pk in enumerate(P):  # pocket capture
-                if np.linalg.norm(pos[i] - pk) < cap:
+            for k, (qx, qy) in enumerate(P):  # pocket capture
+                if hyp(px[i] - qx, py[i] - qy) < cap:
                     alive[i] = False
                     pocket_of[i] = k
-                    pos[i] = pk
-                    vel[i] = 0
-                    paths[i].append(pk.copy())
+                    px[i], py[i], vx[i], vy[i] = qx, qy, 0.0, 0.0
+                    paths[i].append((qx, qy))
                     break
             if not alive[i]:
                 continue
-            for ax, lo, hi in ((0, x0, x1), (1, y0, y1)):  # cushions
-                if pos[i][ax] < lo:
-                    pos[i][ax] = lo + (lo - pos[i][ax]); vel[i][ax] = abs(vel[i][ax]) * E_RAIL; rails[i] += 1
-                    paths[i].append(pos[i].copy()); last_rec[i] = pos[i]
-                elif pos[i][ax] > hi:
-                    pos[i][ax] = hi - (pos[i][ax] - hi); vel[i][ax] = -abs(vel[i][ax]) * E_RAIL; rails[i] += 1
-                    paths[i].append(pos[i].copy()); last_rec[i] = pos[i]
-        for i in mov:  # ball-ball
+            hit = False
+            if px[i] < x0:
+                px[i] = 2 * x0 - px[i]; vx[i] = abs(vx[i]) * E_RAIL; hit = True
+            elif px[i] > x1:
+                px[i] = 2 * x1 - px[i]; vx[i] = -abs(vx[i]) * E_RAIL; hit = True
+            if py[i] < y0:
+                py[i] = 2 * y0 - py[i]; vy[i] = abs(vy[i]) * E_RAIL; hit = True
+            elif py[i] > y1:
+                py[i] = 2 * y1 - py[i]; vy[i] = -abs(vy[i]) * E_RAIL; hit = True
+            if hit:
+                rails[i] += 1
+                paths[i].append((px[i], py[i])); last[i] = (px[i], py[i])
+        movset = set(mov)
+        for i in mov:
             if not alive[i]:
                 continue
             for j in range(n):
                 if j == i or not alive[j]:
                     continue
-                d = pos[j] - pos[i]
-                dist = float(np.linalg.norm(d))
-                if dist >= 2 * R or dist < 1e-6:
+                dx, dy = px[j] - px[i], py[j] - py[i]
+                if abs(dx) >= R2 or abs(dy) >= R2:
                     continue
-                nrm = d / dist
-                rel = float(np.dot(vel[i] - vel[j], nrm))
+                dist = hyp(dx, dy)
+                if dist >= R2 or dist < 1e-6:
+                    continue
+                nx, ny = dx / dist, dy / dist
+                rel = (vx[i] - vx[j]) * nx + (vy[i] - vy[j]) * ny
                 if rel <= 0:
                     continue
-                if j in mov and j < i:
+                if j in movset and j < i:
                     continue  # pair handled once
                 imp = (1 + E_BALL) / 2 * rel
-                vi_before = vel[i].copy()
-                vel[i] -= imp * nrm
-                vel[j] += imp * nrm
-                overlap = 2 * R - dist
-                pos[i] -= nrm * overlap / 2
-                pos[j] += nrm * overlap / 2
+                vib = (vx[i], vy[i])
+                vx[i] -= imp * nx; vy[i] -= imp * ny
+                vx[j] += imp * nx; vy[j] += imp * ny
+                ov = (R2 - dist) / 2
+                px[i] -= nx * ov; py[i] -= ny * ov
+                px[j] += nx * ov; py[j] += ny * ov
                 if ci in (i, j) and not spun:
                     c, o = (i, j) if i == ci else (j, i)
-                    contacts.append({"a": balls[c].id, "b": balls[o].id, "at": pos[c].tolist()})
+                    contacts.append({"a": balls[c].id, "b": balls[o].id, "at": [px[c], py[c]]})
                     spun = True
                     if i == ci:
-                        vel[ci] += spin * abs(float(np.dot(vi_before, nrm))) * nrm
+                        add = spin * abs(vib[0] * nx + vib[1] * ny)
+                        vx[ci] += add * nx; vy[ci] += add * ny
                 elif (balls[i].id, balls[j].id) not in touched and (balls[j].id, balls[i].id) not in touched:
-                    contacts.append({"a": balls[i].id, "b": balls[j].id, "at": pos[i].tolist()})
+                    contacts.append({"a": balls[i].id, "b": balls[j].id, "at": [px[i], py[i]]})
                 touched.add((balls[i].id, balls[j].id))
-                paths[i].append(pos[i].copy()); paths[j].append(pos[j].copy())
-                last_rec[i] = pos[i]; last_rec[j] = pos[j]
+                paths[i].append((px[i], py[i])); paths[j].append((px[j], py[j]))
+                last[i] = (px[i], py[i]); last[j] = (px[j], py[j])
         for i in mov:
-            if alive[i] and np.linalg.norm(pos[i] - last_rec[i]) >= 6:
-                paths[i].append(pos[i].copy()); last_rec[i] = pos[i].copy()
+            if alive[i] and hyp(px[i] - last[i][0], py[i] - last[i][1]) >= 6:
+                paths[i].append((px[i], py[i])); last[i] = (px[i], py[i])
     moves = []
     for i in range(n):
-        if np.linalg.norm(pos[i] - np.array(balls[i].center)) < 0.5 * R and i not in pocket_of:
-            continue
-        pth = paths[i] + ([pos[i].copy()] if i not in pocket_of else [])
-        moves.append({"id": balls[i].id, "label": balls[i].label, "path": [[float(a), float(b)] for a, b in pth],
-                      "start": [float(balls[i].center[0]), float(balls[i].center[1])],
-                      "end": [float(pos[i][0]), float(pos[i][1])], "pocketed": i in pocket_of,
+        b = balls[i]
+        if i != ci and hyp(px[i] - float(b.center[0]), py[i] - float(b.center[1])) < 0.5 * R and i not in pocket_of:
+            continue  # unmoved balls aren't listed; the cue ball always is
+        pth = paths[i] + ([(px[i], py[i])] if i not in pocket_of else [])
+        moves.append({"id": b.id, "label": b.label, "path": [[float(a), float(c)] for a, c in pth],
+                      "start": [float(b.center[0]), float(b.center[1])],
+                      "end": [px[i], py[i]], "pocketed": i in pocket_of,
                       "pocket": pocket_of.get(i), "rails": rails[i]})
     moves.sort(key=lambda m: m["label"] != "cue")
     cm = next((m for m in moves if m["label"] == "cue"), None)
+    first = contacts and contacts[0]["a"] == balls[ci].id
     return {"moves": moves, "contacts": contacts, "cue_scratch": bool(cm and cm["pocketed"]),
-            "first": contacts[0]["b"] if contacts and contacts[0]["a"] == balls[ci].id else None,
-            "ghost": contacts[0]["at"] if contacts and contacts[0]["a"] == balls[ci].id else None}
+            "first": contacts[0]["b"] if first else None, "ghost": contacts[0]["at"] if first else None}
 
 
 def _pocket_name(sess, k):
