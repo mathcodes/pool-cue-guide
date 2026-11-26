@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pool Cue Guide</title>
+<style>
+:root{--bg:#0f1412;--panel:#18201c;--line:#2a3830;--text:#e8efe9;--mut:#93a39a;--acc:#34c27a;--warn:#f0b429;--bad:#ef5b5b}
+@media (prefers-color-scheme:light){:root{--bg:#f3f6f4;--panel:#fff;--line:#d6e0da;--text:#14201a;--mut:#5b6b62}}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+body{margin:0;background:var(--bg);color:var(--text);font:16px/1.45 system-ui,sans-serif}
+header{padding:14px 16px;border-bottom:1px solid var(--line);display:flex;gap:12px;align-items:center}
+header h1{font-size:18px;margin:0}
+main{max-width:1100px;margin:0 auto;padding:16px;display:grid;gap:16px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px}
+button,.btn{background:var(--acc);color:#04170d;border:0;border-radius:10px;padding:10px 16px;font-weight:600;font-size:16px;cursor:pointer}
+button.sec{background:transparent;color:var(--text);border:1px solid var(--line)}
+button:disabled{opacity:.5;cursor:not-allowed}
+.stage{position:relative;width:100%;max-width:900px;margin:auto}
+.stage img{display:block;width:100%;height:auto;border-radius:8px}
+.stage img.ov{position:absolute;inset:0}
+.review{display:grid;gap:16px}
+@media(min-width:900px){.review{grid-template-columns:1.6fr 1fr}}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+input[type=text]{flex:1;min-width:140px;padding:10px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--text);font-size:16px}
+table{width:100%;border-collapse:collapse;margin-top:10px}
+td,th{padding:8px 6px;border-bottom:1px solid var(--line);text-align:left}
+th{font-size:13px;color:var(--mut);font-weight:600}
+td label{display:inline-flex;gap:6px;align-items:center;cursor:pointer}
+td input{width:20px;height:20px}
+.chip{display:inline-block;padding:2px 8px;border-radius:99px;background:var(--bg);border:1px solid var(--line);font-size:13px}
+.mut{color:var(--mut);font-size:14px}.err{color:var(--bad)}.ok{color:var(--acc)}
+.opt{border:1px solid var(--line);border-radius:10px;padding:10px;margin-top:8px;cursor:pointer}
+.opt.on{border-color:var(--acc)}
+#drop{border:2px dashed var(--line);border-radius:12px;padding:28px;text-align:center}
+</style>
+</head>
+<body>
+<header><h1>🎱 Pool Cue Guide</h1><span class="mut">Upload a photo of the table, check the detected balls, approve, get 3 shot options.</span></header>
+<main>
+
+<section class="panel" id="upload">
+  <div id="drop">
+    <p><b>Photo of your table</b></p>
+    <p class="mut">From above if you can, whole felt in view, even light. JPG or PNG, up to 12 MB.</p>
+    <input id="file" type="file" accept="image/*" capture="environment">
+    <p><button id="go" disabled>Analyze photo</button></p>
+    <p id="uerr" class="err" role="alert"></p>
+  </div>
+</section>
+
+<section id="review" class="review" hidden>
+  <div class="panel">
+    <div class="stage" id="stage"><img id="base" alt="Top-down view of the table"><img id="ov" class="ov" alt="Detected balls and shot lines"></div>
+    <p class="mut" id="stagehint">Ball labels (B1, B2…) are drawn on the picture. Magenta rings mark balls on your list.</p>
+  </div>
+
+  <div class="panel">
+    <h2 style="margin:0 0 6px;font-size:17px">Check the balls <span class="chip" id="round"></span></h2>
+    <p class="mut" style="margin-top:0">Type a ball label (like <b>B3</b>) and press Add, or tap one under <i>All detected balls</i>. Then tick <b>Improve</b> (re-detect it) or <b>Remove</b> (it isn't a ball).</p>
+    <form id="addf" class="row"><input id="lab" type="text" placeholder="B3, B7" autocomplete="off" aria-label="Ball labels"><button class="sec" type="submit">Add</button></form>
+    <table id="entries" hidden><thead><tr><th>Ball</th><th>Improve</th><th>Remove</th><th></th></tr></thead><tbody></tbody></table>
+    <div class="row" style="margin-top:12px">
+      <button id="rerun" disabled>Re-run on marked</button>
+      <button id="missing" class="sec">Look for missing balls</button>
+    </div>
+    <p id="rep" class="mut" role="status"></p>
+    <details style="margin-top:8px"><summary class="mut">All detected balls</summary><div id="all" class="row" style="margin-top:8px"></div></details>
+    <hr style="border:0;border-top:1px solid var(--line);margin:14px 0">
+    <div class="row">
+      <label class="mut">Your group
+        <select id="group"><option value="open">Open table</option><option value="solid">Solids</option><option value="stripe">Stripes</option></select>
+      </label>
+      <button id="approve">Approved ✔</button>
+    </div>
+    <p id="aerr" class="err" role="alert"></p>
+  </div>
+</section>
+
+<section class="panel" id="results" hidden>
+  <h2 style="margin:0 0 6px;font-size:17px">Your 3 best options</h2>
+  <div id="opts"></div>
+  <p class="mut">Ratings are heuristic. Speed, spin and safety quality are estimates, not measurements.</p>
+  <button class="sec" id="back">Back to review</button>
+</section>
+</main>
+
+<script>
+const $=s=>document.querySelector(s);
+let sid=null, st=null, entries=new Map(), opt=0, opts=[];
+
+$('#file').onchange=()=>{$('#go').disabled=!$('#file').files.length};
+$('#go').onclick=async()=>{
+  $('#uerr').textContent='';$('#go').disabled=true;$('#go').textContent='Analyzing…';
+  const fd=new FormData();fd.append('file',$('#file').files[0]);
+  try{
+    const r=await fetch('/api/sessions',{method:'POST',body:fd});
+    const j=await r.json();
+    if(!r.ok)throw new Error(j.detail||'Upload failed');
+    sid=j.id;st=j;entries=new Map();show();
+    $('#upload').hidden=true;$('#review').hidden=false;
+  }catch(e){$('#uerr').textContent=e.message}
+  $('#go').disabled=false;$('#go').textContent='Analyze photo';
+};
+
+function norm(x){return x.trim().toUpperCase().replace(/^BALL\s*/,'')}
+function ids(){return st.balls.map(b=>b.id)}
+function refresh(){
+  const pick=[...entries.keys()].join(',');
+  $('#base').src=`/api/sessions/${sid}/image.png?r=${st.round}`;
+  $('#ov').src=`/api/sessions/${sid}/overlay.png?r=${st.round}&option=${opt}&pick=${encodeURIComponent(pick)}`;
+}
+function show(){
+  $('#round').textContent='Round '+st.round+' · '+st.balls.length+' balls';
+  $('#all').innerHTML='';
+  st.balls.forEach(b=>{const c=document.createElement('button');c.className='sec';c.type='button';c.style.padding='4px 10px';
+    c.textContent=b.id+' '+b.label;c.onclick=()=>addEntry(b.id);$('#all').append(c)});
+  drawEntries();refresh();
+}
+function addEntry(raw){
+  const id=norm(raw);
+  if(!ids().includes(id)){$('#rep').textContent=`"${raw.trim()}" isn't a ball label on the picture.`;return}
+  if(!entries.has(id))entries.set(id,{improve:true,remove:false});
+  $('#rep').textContent='';drawEntries();refresh();
+}
+$('#addf').onsubmit=e=>{e.preventDefault();$('#lab').value.split(/[\s,;]+/).filter(Boolean).forEach(addEntry);$('#lab').value=''};
+function drawEntries(){
+  const tb=$('#entries tbody');tb.innerHTML='';
+  $('#entries').hidden=!entries.size;$('#rerun').disabled=!entries.size;
+  entries.forEach((v,id)=>{
+    const b=st.balls.find(x=>x.id===id);
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td><b>${id}</b> <span class="mut">${b?b.label:''}</span></td>
+      <td><label><input type="checkbox" data-k="improve" ${v.improve?'checked':''} aria-label="Improve ${id}"></label></td>
+      <td><label><input type="checkbox" data-k="remove" ${v.remove?'checked':''} aria-label="Remove ${id}"></label></td>
+      <td><button class="sec" type="button" style="padding:2px 10px" aria-label="Drop ${id} from list">✕</button></td>`;
+    tr.querySelectorAll('input').forEach(i=>i.onchange=()=>{
+      const k=i.dataset.k;v[k]=i.checked;if(i.checked)v[k==='improve'?'remove':'improve']=false;drawEntries()});
+    tr.querySelector('button').onclick=()=>{entries.delete(id);drawEntries();refresh()};
+    tb.append(tr);
+  });
+}
+async function post(path,body){
+  const r=await fetch(`/api/sessions/${sid}/${path}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const j=await r.json();if(!r.ok)throw new Error(j.detail||'Request failed');return j;
+}
+function say(rep){
+  const p=[];
+  if(rep.improved.length)p.push('re-fit '+rep.improved.join(', '));
+  if(rep.unchanged.length)p.push('couldn\'t improve '+rep.unchanged.join(', ')+' (try Remove, or retake the photo)');
+  if(rep.removed.length)p.push('removed '+rep.removed.join(', '));
+  if(rep.added)p.push('found '+rep.added+' more');
+  if(rep.unknown.length)p.push('unknown: '+rep.unknown.join(', '));
+  return p.length?p.join('; ')+'.':'Nothing changed.';
+}
+async function rerun(find){
+  $('#aerr').textContent='';
+  const improve=[],remove=[];entries.forEach((v,id)=>{if(v.remove)remove.push(id);else if(v.improve)improve.push(id)});
+  try{
+    const j=await post('review',{improve,remove,find_missing:!!find});
+    st=j;entries=new Map();$('#rep').textContent=say(j.report);show();
+  }catch(e){$('#rep').textContent=e.message;$('#rep').className='err'}
+}
+$('#rerun').onclick=()=>rerun(false);
+$('#missing').onclick=()=>rerun(true);
+$('#approve').onclick=async()=>{
+  $('#aerr').textContent='';
+  try{
+    const j=await post('approve',{group:$('#group').value});
+    st=j;opts=j.options;opt=opts.length?1:0;
+    $('#review').hidden=true;$('#results').hidden=false;$('#stagehint').hidden=true;drawOpts();refresh();
+    $('#stage').scrollIntoView({behavior:'smooth'});
+  }catch(e){$('#aerr').textContent=e.message}
+};
+function drawOpts(){
+  $('#results').insertBefore($('#stage').parentElement,$('#opts'));
+  const box=$('#opts');box.innerHTML='';
+  if(!opts.length)box.innerHTML='<p class="mut">No clear shot found. Try Back to review and fix any wrong balls.</p>';
+  opts.forEach((o,i)=>{
+    const d=document.createElement('div');d.className='opt'+(opt===i+1?' on':'');d.tabIndex=0;
+    d.innerHTML=`<b>#${o.rank} ${o.kind==='defense'?'🛡 Safety':'🎯 Pot'}</b> <span class="chip">rating ${o.rating}</span><div>${o.summary}</div>`;
+    const pick=()=>{opt=i+1;drawOpts();refresh()};
+    d.onclick=pick;d.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();pick()}};
+    box.append(d);
+  });
+}
+$('#back').onclick=()=>{
+  opt=0;$('#stagehint').hidden=false;$('#results').hidden=true;$('#review').hidden=false;
+  $('#review').insertBefore($('#stage').parentElement,$('#review').firstChild);refresh();
+};
+</script>
+</body>
+</html>
