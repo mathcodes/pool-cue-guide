@@ -653,6 +653,36 @@ _COL = {  # BGRA
 }
 
 
+def _corner_quad(sess):
+    P = np.array(sess.pockets, float) if len(sess.pockets) else np.zeros((0, 2))
+    if len(P) < 4:
+        return None
+    idx = [int(np.argmin(P.sum(1))), int(np.argmax(P[:, 0] - P[:, 1])), int(np.argmax(P.sum(1))), int(np.argmax(P[:, 1] - P[:, 0]))]
+    return P[idx] if len(set(idx)) == 4 else None   # TL, TR, BR, BL
+
+
+def _draw_diamond_grid(img, sess):
+    """Faint lines joining opposite diamonds (long rail 8 sections, short rail 4; the side pockets sit at section 4)."""
+    q = _corner_quad(sess)
+    if q is None:
+        return
+    TL, TR, BR, BL = q
+    horiz_long = np.linalg.norm(TR - TL) >= np.linalg.norm(BL - TL)
+    nu, nv = (8, 4) if horiz_long else (4, 8)
+
+    def at(u, v):  # bilinear point, u along TL->TR, v along TL->BL
+        return TL * (1 - u) * (1 - v) + TR * u * (1 - v) + BL * (1 - u) * v + BR * u * v
+    col = (235, 245, 235, 70)
+    for k in range(1, nu):
+        if nu == 8 and k == 4:
+            continue  # that's the side pocket, there is no diamond there
+        cv2.line(img, _pt(at(k / nu, 0)), _pt(at(k / nu, 1)), col, 1, cv2.LINE_AA)
+    for k in range(1, nv):
+        if nv == 8 and k == 4:
+            continue
+        cv2.line(img, _pt(at(0, k / nv)), _pt(at(1, k / nv)), col, 1, cv2.LINE_AA)
+
+
 def overlay_png(sess: Session, option: Optional[dict] = None, pick: Optional[list] = None) -> bytes:
     """Transparent RGBA drawing of pockets, labelled balls and (optionally) one shot, same size as the rectified image."""
     h, w = sess.rect.shape[:2]
@@ -667,6 +697,7 @@ def overlay_png(sess: Session, option: Optional[dict] = None, pick: Optional[lis
         c0 = P.mean(axis=0)
         ring = sorted(sess.pockets, key=lambda p: math.atan2(p[1] - c0[1], p[0] - c0[0]))
         cv2.polylines(img, [np.array([_pt(p) for p in ring], np.int32)], True, GREEN, 2, cv2.LINE_AA)
+    _draw_diamond_grid(img, sess)
     pr = int(sess.pocket_r) if sess.pocket_r else 20
     for p in sess.pockets:
         cv2.circle(img, _pt(p), pr, GREEN, 3, cv2.LINE_AA)

@@ -1,6 +1,7 @@
 """FastAPI service: upload a table photo, review labelled balls, approve, get the 3 best shots."""
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from typing import Optional
@@ -91,6 +92,15 @@ async def create(file: UploadFile = File(...)):
         SESSIONS.pop(min(SESSIONS, key=lambda k: SESSIONS[k].created), None)
     SESSIONS[s.id] = s
     return _state(s)
+
+
+_RAILS = json.loads((Path(__file__).parent / "data" / "rail_shots.json").read_text())
+
+
+@app.get("/api/rails")
+def rails():
+    """Stored library of rail-shot examples and diamond systems (built by tools/gen_rails.py; no lookups)."""
+    return _RAILS
 
 
 class RandomReq(BaseModel):

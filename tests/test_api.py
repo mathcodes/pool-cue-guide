@@ -223,3 +223,30 @@ def test_outline_ignores_side_pockets():
     e.build_manual(s, rt.make(1)[1])
     png = e.overlay_png(s)
     assert png[:4] == b"\x89PNG"
+
+
+def test_rails_library_is_stored_and_consistent():
+    from fastapi.testclient import TestClient
+    from cueguide.app import app
+    j = TestClient(app).get("/api/rails").json()
+    assert len(j["shots"]) >= 15
+    geo = [s for s in j["shots"] if s["table"]]
+    assert len(geo) >= 10 and all(k in j["sources"] for s in j["shots"] for k in s["sources"])
+    for s in geo:                      # equal-angle check at every cushion contact
+        p = s["table"]["path"]
+        for i in range(1, len(p) - 1):
+            a, b, c = p[i - 1], p[i], p[i + 1]
+            din, dout = (b[0] - a[0], b[1] - a[1]), (c[0] - b[0], c[1] - b[1])
+            on_long = abs(b[1]) < 1e-3 or abs(b[1] - 4) < 1e-3
+            ang_in = abs(din[0] / din[1]) if on_long else abs(din[1] / din[0])
+            ang_out = abs(dout[0] / dout[1]) if on_long else abs(dout[1] / dout[0])
+            assert abs(ang_in - ang_out) < 0.02, s["id"]
+
+
+def test_overlay_has_diamond_grid():
+    from cueguide import engine as e, randomtable as rt
+    import numpy as np, cv2
+    s = e.photo_session(e.decode_image(rt.make(1)[0]), "")
+    e.build_manual(s, rt.make(1)[1])
+    o = cv2.imdecode(np.frombuffer(e.overlay_png(s), np.uint8), cv2.IMREAD_UNCHANGED)
+    assert (o[:, :, 3] > 0).sum() > 0

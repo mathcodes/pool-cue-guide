@@ -48,6 +48,9 @@ td input[type=checkbox]{width:20px;height:20px}
 .fx{margin:6px 0 0;padding-left:18px}.fx li{margin:2px 0}
 .optrow{display:flex;gap:12px;align-items:flex-start}.cut{flex:0 0 auto}.optbody{flex:1;min-width:0}
 .playbtn{margin-top:8px}
+.railgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px;margin-top:12px}
+.rcard{border:1px solid var(--line);border-radius:12px;padding:12px}.rcard h3{margin:0 0 6px;font-size:15px}
+.rcard svg.tbl{width:100%;height:auto;display:block;margin:6px 0;border-radius:8px}.rcard ol,.rcard ul{margin:6px 0;padding-left:18px}.rcard li{margin:3px 0}
 </style>
 </head>
 <body>
@@ -60,7 +63,7 @@ td input[type=checkbox]{width:20px;height:20px}
     <p class="mut">From above if you can, whole felt in view, even light. JPG or PNG, up to 12 MB.</p>
     <p class="mut"><b>Best results:</b> cover the six pockets with bright green (neon) discs, <i>or</i> tap the pockets and balls yourself after uploading.</p>
     <input id="file" type="file" accept="image/*" capture="environment">
-    <p><button id="go" disabled>Analyze photo</button> <span class="mut">or</span> <button id="rand" class="sec" type="button">🎲 Random table</button></p>
+    <p><button id="go" disabled>Analyze photo</button> <span class="mut">or</span> <button id="rand" class="sec" type="button">🎲 Random table</button> <button id="rails" class="sec" type="button">📐 Rails</button></p>
     <p class="mut">Random makes up a practice table with randomly placed balls so you can try the app. You can remove and add balls afterwards.</p>
     <p id="uerr" class="err" role="alert"></p>
   </div>
@@ -72,6 +75,7 @@ td input[type=checkbox]{width:20px;height:20px}
       <button class="sec tab" id="tabAuto" role="tab" aria-selected="true" type="button">Detected view</button>
       <button class="sec tab" id="tabTap" role="tab" aria-selected="false" type="button">✋ Tap to place</button>
       <button class="sec" id="rand2" type="button" hidden>🎲 New random table</button>
+      <button class="sec" id="rails2" type="button" hidden>📐 Rails</button>
     </div>
 
     <div id="autoStage">
@@ -123,6 +127,14 @@ td input[type=checkbox]{width:20px;height:20px}
   </div>
 </section>
 
+<section class="panel" id="railsSec" hidden>
+  <div class="row" style="justify-content:space-between"><h2 style="margin:0;font-size:17px">📐 Rail shots and diamond systems</h2><button class="sec" id="railsBack" type="button">← Back</button></div>
+  <p class="mut">Stored examples, ready to use anytime. Paths are exact equal-angle (no spin) reflections on a 9 ft table; the diamonds are numbered along the long rail (1 to 7) and short rail (1 to 3). Tables, cloth and spin move the real result, so test on your table.</p>
+  <div class="seg" id="railFilter" role="radiogroup" aria-label="Filter"></div>
+  <div id="railGrid" class="railgrid"></div>
+  <p class="mut" id="railSrc"></p>
+</section>
+
 <section class="panel" id="results" hidden>
   <h2 style="margin:0 0 6px;font-size:17px">Your 3 best options</h2>
   <div class="mut" style="margin-bottom:4px">You are shooting:</div><div class="seg" id="seg2" role="radiogroup" aria-label="Your group"></div>
@@ -166,12 +178,61 @@ async function newRandom(){
     sid=j.id;st=j;entries=new Map();pts=j.items||[];sel=-1;opt=0;opts=[];played=0;
     $('#upload').hidden=true;$('#results').hidden=true;$('#review').hidden=false;$('#stagehint').hidden=false;
     $('#review').insertBefore($('#leftpanel'),$('#review').firstChild);$('#tabAuto').parentElement.hidden=false;
-    $('#rand2').hidden=false;show();setView('auto');
+    $('#rand2').hidden=false;$('#rails2').hidden=false;show();setView('auto');
     $('#rep').textContent='Random practice table. To remove balls tick Remove and Re-run, or open Tap to place to delete and add balls, then Build.';
     $('#rep').className='mut';
   }catch(e){$('#uerr').textContent=e.message}
 }
 $('#rand').onclick=newRandom;$('#rand2').onclick=newRandom;
+
+
+/* ---------- rails library ---------- */
+let railsData=null, railsFrom=[], railFilter='all';
+const CATS=[['all','All'],['kick','Kicks'],['bank','Banks'],['system','Systems'],['spin','Spin & speed']];
+function tableSvg(t){
+  const o=t.object,c=t.cue,pk=t.pocket;
+  const dia=[];for(let i=1;i<8;i++)if(i!==4){dia.push([i,-0.24],[i,4.24])}for(let j=1;j<4;j++)dia.push([-0.24,j],[8.24,j]);
+  let g=`<svg class="tbl" viewBox="-0.75 -0.85 9.5 5.7" role="img" aria-label="Rail shot diagram">
+   <rect x="-0.5" y="-0.5" width="9" height="5" rx="0.25" fill="#7a4a35"/><rect x="0" y="0" width="8" height="4" fill="#5fa56c"/>`;
+  for(let i=1;i<8;i++)if(i!==4)g+=`<line x1="${i}" y1="0" x2="${i}" y2="4" stroke="#fff" stroke-opacity=".25" stroke-width=".02"/>`;
+  for(let j=1;j<4;j++)g+=`<line x1="0" y1="${j}" x2="8" y2="${j}" stroke="#fff" stroke-opacity=".25" stroke-width=".02"/>`;
+  [[0,0],[4,-0.04],[8,0],[0,4],[4,4.04],[8,4]].forEach(([x,y])=>g+=`<circle cx="${x}" cy="${y}" r=".24" fill="#111"/>`);
+  dia.forEach(([x,y])=>g+=`<path d="M${x} ${y-.07}L${x+.07} ${y}L${x} ${y+.07}L${x-.07} ${y}Z" fill="#f5f5f5"/>`);
+  for(let i=1;i<8;i++)if(i!==4)g+=`<text x="${i}" y="-0.58" font-size=".28" text-anchor="middle" fill="currentColor">${i}</text>`;
+  for(let j=1;j<4;j++)g+=`<text x="-0.62" y="${j+.1}" font-size=".28" text-anchor="middle" fill="currentColor">${j}</text>`;
+  if(pk)g+=`<circle cx="${pk[0]}" cy="${pk[1]}" r=".3" fill="none" stroke="#22c55e" stroke-width=".07"/>`;
+  g+=`<polyline points="${t.path.map(p=>p.join(',')).join(' ')}" fill="none" stroke="#fff" stroke-width=".07" stroke-dasharray=".02 .17" stroke-linecap="round"/>`;
+  const last=t.path.length-1,a=t.path[last-1],b=t.path[last],dx=b[0]-a[0],dy=b[1]-a[1],L=Math.hypot(dx,dy)||1,ux=dx/L,uy=dy/L;
+  g+=`<polygon points="${b[0]},${b[1]} ${b[0]-ux*.3-uy*.14},${b[1]-uy*.3+ux*.14} ${b[0]-ux*.3+uy*.14},${b[1]-uy*.3-ux*.14}" fill="#fff"/>`;
+  t.contacts.forEach(k=>{g+=`<circle cx="${k.x}" cy="${k.y}" r=".1" fill="#ef2d2d"/>`;
+    const ty=k.y<=0.01?k.y+.42:k.y>=3.99?k.y-.3:k.y, tx=k.x<=0.01?k.x+.38:k.x>=7.99?k.x-.38:k.x;
+    g+=`<text x="${tx}" y="${ty+.08}" font-size=".3" font-weight="700" text-anchor="middle" fill="#fff" stroke="#000" stroke-width=".04" paint-order="stroke">${k.label}</text>`});
+  if(c)g+=`<circle cx="${c[0]}" cy="${c[1]}" r=".14" fill="#fff" stroke="#111" stroke-width=".04"/><text x="${c[0]}" y="${c[1]-.22}" font-size=".26" text-anchor="middle" fill="#fff" stroke="#000" stroke-width=".04" paint-order="stroke">cue</text>`;
+  g+=`<circle cx="${o[0]}" cy="${o[1]}" r=".14" fill="#f59e0b" stroke="#111" stroke-width=".04"/><text x="${o[0]}" y="${o[1]-.22}" font-size=".26" text-anchor="middle" fill="#fff" stroke="#000" stroke-width=".04" paint-order="stroke">${c?'object':'ball'}</text>`;
+  return g+'</svg>';
+}
+function drawRails(){
+  const f=$('#railFilter');f.innerHTML='';
+  CATS.forEach(([k,l])=>{const b=document.createElement('button');b.type='button';b.textContent=l;b.setAttribute('role','radio');b.setAttribute('aria-checked',railFilter===k);
+    b.onclick=()=>{railFilter=k;drawRails()};f.append(b)});
+  const grid=$('#railGrid');grid.innerHTML='';
+  railsData.shots.filter(s=>railFilter==='all'||s.category===railFilter).forEach(s=>{
+    const d=document.createElement('article');d.className='rcard';
+    const src=s.sources.map(k=>`<a href="${railsData.sources[k].url}" target="_blank" rel="noopener">${railsData.sources[k].title}</a>`).join(' · ');
+    d.innerHTML=`<h3>${s.title}</h3>${s.table?tableSvg(s.table):''}<div>${s.summary}</div>
+      <ol>${s.how.map(x=>'<li>'+x+'</li>').join('')}</ol><ul>${s.tips.map(x=>'<li>'+x+'</li>').join('')}</ul>
+      <div class="mut" style="font-size:12px">Sources: ${src}</div>`;
+    grid.append(d);
+  });
+}
+async function openRails(){
+  if(!railsData){const r=await fetch('/api/rails');railsData=await r.json()}
+  railsFrom=['upload','review','results'].filter(id=>!$('#'+id).hidden);
+  ['upload','review','results'].forEach(id=>$('#'+id).hidden=true);
+  $('#railsSec').hidden=false;drawRails();window.scrollTo({top:0});
+}
+$('#rails').onclick=openRails;$('#rails2').onclick=openRails;
+$('#railsBack').onclick=()=>{$('#railsSec').hidden=true;railsFrom.forEach(id=>$('#'+id).hidden=false);if(!railsFrom.length)$('#upload').hidden=false};
 
 /* ---------- views ---------- */
 function setView(v){
