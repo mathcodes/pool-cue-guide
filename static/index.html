@@ -44,6 +44,7 @@ td input{width:20px;height:20px}
   <div id="drop">
     <p><b>Photo of your table</b></p>
     <p class="mut">From above if you can, whole felt in view, even light. JPG or PNG, up to 12 MB.</p>
+    <p class="mut"><b>Best results:</b> cover the six pockets with bright green (neon) discs. The app uses their centres as the table outline.</p>
     <input id="file" type="file" accept="image/*" capture="environment">
     <p><button id="go" disabled>Analyze photo</button></p>
     <p id="uerr" class="err" role="alert"></p>
@@ -53,6 +54,7 @@ td input{width:20px;height:20px}
 <section id="review" class="review" hidden>
   <div class="panel">
     <div class="stage" id="stage"><img id="base" alt="Top-down view of the table"><img id="ov" class="ov" alt="Detected balls and shot lines"></div>
+    <p id="modenote" class="mut" role="status"></p>
     <p class="mut" id="stagehint">Ball labels (B1, B2…) are drawn on the picture. Magenta rings mark balls on your list.</p>
   </div>
 
@@ -112,6 +114,9 @@ function refresh(){
   $('#ov').src=`/api/sessions/${sid}/overlay.png?r=${st.round}&option=${opt}&pick=${encodeURIComponent(pick)}`;
 }
 function show(){
+  $('#modenote').innerHTML=st.mode==='markers'
+    ? '<span class="ok">✔ Using the green pocket markers as the table outline ('+st.pockets+' pockets).</span>'
+    : 'No green pocket markers found, so the outline was guessed. Mark the six pockets bright green for a more exact result.';
   $('#round').textContent='Round '+st.round+' · '+st.balls.length+' balls';
   $('#all').innerHTML='';
   st.balls.forEach(b=>{const c=document.createElement('button');c.className='sec';c.type='button';c.style.padding='4px 10px';

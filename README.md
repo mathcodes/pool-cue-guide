@@ -10,4 +10,6 @@ python -m pytest -q tests
 
 Deploy on Railway: connect the repo; the `Dockerfile` and `railway.json` are picked up (health check `/healthz`). Keep one worker: sessions are held in memory for an hour.
 
+**Pocket markers (recommended).** Cover the six pockets with bright green (neon) discs. Their centres become the table outline: the four corner pockets set a perspective-correct top-down view, and the playing area is just inside them. With 4 markers (corners only) the side pockets are derived. With any other count the app falls back to automatic detection (felt colour + shape), which works best on top-down photos.
+
 Detection is heuristic (felt colour + Hough circles + colour blobs). Ratings and speed/spin numbers are estimates.

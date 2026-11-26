@@ -32,6 +32,8 @@ class Session:
     next_id: int = 1
     created: float = field(default_factory=time.time)
     history: list = field(default_factory=list)
+    mode: str = "auto"          # 'markers' (green pocket markers) or 'auto' (colour/shape guess)
+    pocket_r: float = 0.0       # pocket radius in rectified pixels (markers mode)
 
 
 class AnalysisError(Exception):
@@ -151,6 +153,83 @@ def _pockets(rect: np.ndarray, mask: np.ndarray) -> list:
     return out
 
 
+# ---------------------------------------------------------------- green pocket markers
+
+MARKER_HUE = (40, 72)   # OpenCV hue of the neon green (about 53); felt is usually blue or a darker/duller green
+
+
+def _find_markers(src: np.ndarray) -> list:
+    """Bright-green discs painted/placed over the pockets. Returns [(x, y, r)], biggest first."""
+    h, w = src.shape[:2]
+    hsv = cv2.cvtColor(src, cv2.COLOR_BGR2HSV)
+    m = ((hsv[:, :, 0] >= MARKER_HUE[0]) & (hsv[:, :, 0] <= MARKER_HUE[1])
+         & (hsv[:, :, 1] >= 130) & (hsv[:, :, 2] >= 190)).astype(np.uint8) * 255
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    m = cv2.morphologyEx(cv2.morphologyEx(m, cv2.MORPH_OPEN, k), cv2.MORPH_CLOSE, k)
+    cnts, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    out = []
+    for c in cnts:
+        area = cv2.contourArea(c)
+        if not (0.0012 * h * w <= area <= 0.04 * h * w):
+            continue
+        (x, y), r = cv2.minEnclosingCircle(c)
+        bx, by, bw, bh = cv2.boundingRect(c)
+        edge = bx <= 1 or by <= 1 or bx + bw >= w - 1 or by + bh >= h - 1
+        if not edge and area < 0.6 * math.pi * r * r:
+            continue  # not disc-shaped
+        out.append((float(x), float(y), float(r)))
+    out.sort(key=lambda t: -t[2])
+    return out[:6] if len(out) in (4, 5, 6) or len(out) > 6 else out
+
+
+def _marker_layout(mk: list):
+    """6 markers = all pockets; 4 = corner pockets only (sides are the midpoints of the long sides).
+    Anything else is ambiguous, so the caller falls back to automatic detection."""
+    if len(mk) not in (4, 6):
+        return None
+    pts = np.array([[x, y] for x, y, _ in mk], np.float32)
+    rm = float(np.mean([r for _, _, r in mk]))
+    xs, ys = pts[:, 0], pts[:, 1]
+    idx = [int(np.argmin(xs + ys)), int(np.argmax(xs - ys)), int(np.argmax(xs + ys)), int(np.argmin(xs - ys))]
+    if len(set(idx)) != 4:
+        return None
+    quad = pts[idx]                                    # TL, TR, BR, BL (corner pockets)
+    top, right = np.linalg.norm(quad[1] - quad[0]), np.linalg.norm(quad[2] - quad[1])
+    if top < right:                                    # portrait: make a long side the "top"
+        quad = np.roll(quad, -1, axis=0)
+    if len(mk) == 6:
+        mids = [pts[i] for i in range(6) if i not in idx]
+    else:
+        mids = [(quad[0] + quad[1]) / 2, (quad[3] + quad[2]) / 2]
+    return quad, [*quad, *mids], rm
+
+
+def _grow(quad: np.ndarray, d: float) -> np.ndarray:
+    """Move every corner outward (d>0) or inward (d<0) along both of its edges."""
+    out = []
+    for i in range(4):
+        c, nx, pv = quad[i], quad[(i + 1) % 4], quad[i - 1]
+        out.append(c - _unit(nx - c) * d - _unit(pv - c) * d)
+    return np.array(out, np.float32)
+
+
+def _hough_balls(rect: np.ndarray, mask: np.ndarray) -> list:
+    """Circle search sized for balls on a table that fills the picture (about 1-2.5% of its width)."""
+    gray = cv2.medianBlur(cv2.cvtColor(rect, cv2.COLOR_BGR2GRAY), 5)
+    h, w = gray.shape
+    lo, hi = max(6, int(0.009 * w)), int(0.025 * w)
+    cs = cv2.HoughCircles(gray, cv2.HOUGH_GRADIENT, dp=1.2, minDist=lo * 2, param1=120, param2=20,
+                          minRadius=lo, maxRadius=hi)
+    out = []
+    if cs is not None:
+        for x, y, r in np.round(cs[0]).astype(int):
+            if x - r < 0 or y - r < 0 or x + r >= w or y + r >= h or mask[y, x] == 0:
+                continue
+            out.append(v.Ball(center=np.array([x, y], dtype=np.float32), radius=float(r),
+                              mean_bgr=_patch_mean(rect, int(x), int(y), int(r))))
+    return out
+
+
 # ---------------------------------------------------------------- analyze
 
 def decode_image(data: bytes) -> np.ndarray:
@@ -239,12 +318,25 @@ def _inside_play(mask: np.ndarray, R: float, balls: list) -> list:
             and play[int(b.center[1]), int(b.center[0])] > 0]
 
 
-def analyze(data: bytes) -> Session:
-    src = decode_image(data)
+def _build_markers(src: np.ndarray, layout):
+    quad, six, rm = layout
+    padded = _grow(quad, 1.15 * rm)    # pockets sit on the corners; grow so they are fully in the picture
+    inner = _grow(quad, -0.5 * rm)     # playing area: just inside the cushions
+    rect, H = v.warp_to_topdown(src, padded, target_short=900)
+    tf = lambda pts: cv2.perspectiveTransform(np.array(pts, np.float32)[None], H)[0]
+    mask = np.zeros(rect.shape[:2], np.uint8)
+    cv2.fillConvexPoly(mask, tf(inner).astype(np.int32), 255)
+    pockets = [p.astype(np.float32) for p in tf(six)]
+    width_src = 0.5 * (np.linalg.norm(padded[1] - padded[0]) + np.linalg.norm(padded[2] - padded[3]))
+    return rect, mask, pockets, rm * rect.shape[1] / max(1.0, float(width_src))
+
+
+def _build_auto(src: np.ndarray):
     corners, ref, inner_quad = _find_table(src)
     if corners is None:
         raise AnalysisError(
-            "Couldn't find the table. Take the photo from above with the whole felt in view and even lighting."
+            "Couldn't find the table. Take the photo from above with the whole felt in view and even lighting, "
+            "or mark the six pockets bright green."
         )
     rect, H = v.warp_to_topdown(src, corners, target_short=900)
     mask, _ = _felt_mask(rect, ref)
@@ -252,8 +344,16 @@ def analyze(data: bytes) -> Session:
     inner = np.zeros_like(mask)
     cv2.fillConvexPoly(inner, cv2.perspectiveTransform(inner_quad[None].astype(np.float32), H)[0].astype(np.int32), 255)
     mask = cv2.bitwise_and(mask, inner)
-    pockets = _pockets(rect, mask)
-    balls = v.detect_balls(rect, mask)
+    return rect, mask, _pockets(rect, mask), 0.0
+
+
+def analyze(data: bytes) -> Session:
+    src = decode_image(data)
+    layout = _marker_layout(_find_markers(src))
+    mode = "markers" if layout else "auto"
+    rect, mask, pockets, pocket_r = _build_markers(src, layout) if layout else _build_auto(src)
+
+    balls = _hough_balls(rect, mask)
     if len(balls) >= 4:
         med = float(np.median([b.radius for b in balls]))
         balls = [b for b in balls if 0.75 * med <= b.radius <= 1.3 * med]
@@ -261,7 +361,7 @@ def analyze(data: bytes) -> Session:
     felt = _felt_hsv(rect, mask)
     if felt[1] < 35:
         raise AnalysisError("That doesn't look like a pool table (no felt colour found). Try another photo.")
-    R0 = float(np.median([b.radius for b in balls])) if balls else 0.025 * rect.shape[1]
+    R0 = float(np.median([b.radius for b in balls])) if len(balls) >= 3 else 0.013 * rect.shape[1]
     balls += _blob_balls(rect, mask, felt, pockets, balls, R0)
     balls = _on_felt(rect, felt, balls)
     balls = _inside_play(mask, R0, balls)
@@ -269,9 +369,9 @@ def analyze(data: bytes) -> Session:
     if len(balls) < 2:
         raise AnalysisError("Couldn't find the balls. Use a sharper, brighter photo from above.")
     sess = Session(id=uuid.uuid4().hex[:12], rect=rect, table_mask=mask, pockets=pockets, balls=balls,
-                   felt_hsv=felt)
+                   felt_hsv=felt, mode=mode, pocket_r=pocket_r)
     _assign_ids(sess, sess.balls)
-    sess.history.append({"round": 0, "action": "initial detection", "balls": len(balls)})
+    sess.history.append({"round": 0, "action": f"initial detection ({mode})", "balls": len(balls)})
     return sess
 
 
@@ -398,9 +498,14 @@ def overlay_png(sess: Session, option: Optional[dict] = None, pick: Optional[lis
     """Transparent RGBA drawing of pockets, labelled balls and (optionally) one shot, same size as the rectified image."""
     h, w = sess.rect.shape[:2]
     img = np.zeros((h, w, 4), np.uint8)
+    GREEN = (90, 255, 100, 255)
+    if len(sess.pockets) >= 3:
+        c0 = np.mean(sess.pockets, axis=0)
+        ring = sorted(sess.pockets, key=lambda p: math.atan2(p[1] - c0[1], p[0] - c0[0]))
+        cv2.polylines(img, [np.array([_pt(p) for p in ring], np.int32)], True, GREEN, 2, cv2.LINE_AA)  # table outline
+    pr = int(sess.pocket_r) if sess.pocket_r else 20
     for p in sess.pockets:
-        x, y = int(p[0]), int(p[1])
-        cv2.rectangle(img, (x - 9, y - 9), (x + 9, y + 9), (0, 255, 255, 255), 2, cv2.LINE_AA)
+        cv2.circle(img, _pt(p), pr, GREEN, 3, cv2.LINE_AA)
     for b in sess.balls:
         c = (int(round(b.center[0])), int(round(b.center[1])))
         col = _COL.get(b.label, _COL["unknown"])

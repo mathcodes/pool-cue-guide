@@ -47,7 +47,7 @@ def _get(sid: str) -> engine.Session:
 def _state(s: engine.Session, extra: Optional[dict] = None) -> dict:
     h, w = s.rect.shape[:2]
     out = {
-        "id": s.id, "round": s.round, "width": w, "height": h, "history": s.history,
+        "id": s.id, "mode": s.mode, "pockets": len(s.pockets), "round": s.round, "width": w, "height": h, "history": s.history,
         "balls": [{"id": b.id, "label": b.label, "x": round(float(b.center[0]), 1),
                    "y": round(float(b.center[1]), 1), "r": round(float(b.radius), 1)} for b in s.balls],
     }

@@ -59,3 +59,35 @@ def test_game_screenshot_whole_table():
     assert 1.6 < st["width"] / st["height"] < 2.3      # table kept whole, not cropped
     a = c.post(f"/api/sessions/{sid}/approve", json={"group": "open"}).json()
     assert len(a["options"]) == 3
+
+
+def _fixture(name):
+    return open(pathlib.Path(__file__).parent / "fixtures" / name, "rb").read()
+
+
+def test_green_pocket_markers_are_the_outline():
+    st = c.post("/api/sessions", files={"file": ("m.jpg", _fixture("green_markers.jpg"), "image/jpeg")}).json()
+    assert st["mode"] == "markers" and st["pockets"] == 6
+    assert len(st["balls"]) == 15
+    sid = st["id"]
+    for _ in range(2):
+        j = c.post(f"/api/sessions/{sid}/review", json={"find_missing": True}).json()
+    assert len(j["balls"]) == 15
+    assert 1.6 < st["width"] / st["height"] < 2.3
+
+
+def test_four_corner_markers_and_fallback():
+    img = cv2.imdecode(np.frombuffer(_fixture("green_markers.jpg"), np.uint8), cv2.IMREAD_COLOR)
+    four = img.copy()
+    for x in (933, 933):                                    # hide the two side-pocket markers
+        pass
+    cv2.circle(four, (933, 52), 75, (40, 60, 90), -1)
+    cv2.circle(four, (933, 966), 75, (40, 60, 90), -1)
+    st = c.post("/api/sessions", files={"file": ("4.jpg", cv2.imencode(".jpg", four)[1].tobytes(), "image/jpeg")}).json()
+    assert st["mode"] == "markers" and st["pockets"] == 6   # side pockets derived from the corners
+    five = four.copy()
+    cv2.circle(five, (78, 75), 75, (40, 60, 90), -1)        # 3 markers left: ambiguous -> automatic detection
+    r = c.post("/api/sessions", files={"file": ("3.jpg", cv2.imencode(".jpg", five)[1].tobytes(), "image/jpeg")})
+    assert r.status_code in (200, 422)
+    if r.status_code == 200:
+        assert r.json()["mode"] == "auto"
