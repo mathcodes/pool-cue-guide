@@ -22,18 +22,22 @@ MAX_SIDE = 1600  # phone photos are downscaled before analysis
 @dataclass
 class Session:
     id: str
-    rect: np.ndarray
-    table_mask: np.ndarray
-    pockets: list
-    balls: list
-    felt_hsv: np.ndarray
+    rect: Optional[np.ndarray] = None
+    table_mask: Optional[np.ndarray] = None
+    pockets: list = field(default_factory=list)
+    balls: list = field(default_factory=list)
+    felt_hsv: Optional[np.ndarray] = None
     suppressed: list = field(default_factory=list)  # (x, y, r) zones the user removed
     round: int = 0
     next_id: int = 1
     created: float = field(default_factory=time.time)
     history: list = field(default_factory=list)
-    mode: str = "auto"          # 'markers' (green pocket markers) or 'auto' (colour/shape guess)
-    pocket_r: float = 0.0       # pocket radius in rectified pixels (markers mode)
+    mode: str = "auto"          # 'markers' | 'auto' | 'manual' | 'none' (photo only, waiting for taps)
+    pocket_r: float = 0.0       # pocket radius in rectified pixels (markers/manual)
+    src_jpg: bytes = b""        # the (downscaled) original, kept as JPEG so sessions stay small
+    src_size: tuple = (0, 0)    # (w, h) of that original: coordinates the tap editor uses
+    H: Optional[np.ndarray] = None   # original -> rectified homography
+    message: str = ""
 
 
 class AnalysisError(Exception):
@@ -182,26 +186,39 @@ def _find_markers(src: np.ndarray) -> list:
     return out[:6] if len(out) in (4, 5, 6) or len(out) > 6 else out
 
 
-def _marker_layout(mk: list):
-    """6 markers = all pockets; 4 = corner pockets only (sides are the midpoints of the long sides).
-    Anything else is ambiguous, so the caller falls back to automatic detection."""
-    if len(mk) not in (4, 6):
+def _layout_from_points(pts: np.ndarray, rm: Optional[float] = None, allow_partial: bool = False):
+    """Pocket points (any numbering) -> (corner quad TL,TR,BR,BL, all six pockets, pocket radius).
+    Corners are the extremes along the diagonals; missing middle pockets are the midpoints of the long sides."""
+    n = len(pts)
+    if n < 4 or n > 6 or (not allow_partial and n not in (4, 6)):
         return None
-    pts = np.array([[x, y] for x, y, _ in mk], np.float32)
-    rm = float(np.mean([r for _, _, r in mk]))
     xs, ys = pts[:, 0], pts[:, 1]
     idx = [int(np.argmin(xs + ys)), int(np.argmax(xs - ys)), int(np.argmax(xs + ys)), int(np.argmin(xs - ys))]
     if len(set(idx)) != 4:
         return None
-    quad = pts[idx]                                    # TL, TR, BR, BL (corner pockets)
+    quad = pts[idx].astype(np.float32)                 # TL, TR, BR, BL
     top, right = np.linalg.norm(quad[1] - quad[0]), np.linalg.norm(quad[2] - quad[1])
     if top < right:                                    # portrait: make a long side the "top"
         quad = np.roll(quad, -1, axis=0)
-    if len(mk) == 6:
-        mids = [pts[i] for i in range(6) if i not in idx]
-    else:
-        mids = [(quad[0] + quad[1]) / 2, (quad[3] + quad[2]) / 2]
-    return quad, [*quad, *mids], rm
+        top, right = right, top
+    mids = [pts[i] for i in range(n) if i not in idx]
+    for a_, b_ in ((quad[0], quad[1]), (quad[3], quad[2])):   # the two long sides
+        mid = (a_ + b_) / 2
+        if not any(np.linalg.norm(m - mid) < 0.25 * top for m in mids):
+            mids.append(mid)
+    if len(mids) != 2:
+        return None
+    if rm is None:
+        rm = 0.03 * float(max(top, right))
+    return quad, [*quad, *mids], float(rm)
+
+
+def _marker_layout(mk: list):
+    """6 markers = all pockets; 4 = corner pockets only. Anything else is ambiguous (automatic detection instead)."""
+    if len(mk) not in (4, 6):
+        return None
+    pts = np.array([[x, y] for x, y, _ in mk], np.float32)
+    return _layout_from_points(pts, rm=float(np.mean([r for _, _, r in mk])))
 
 
 def _grow(quad: np.ndarray, d: float) -> np.ndarray:
@@ -328,7 +345,7 @@ def _build_markers(src: np.ndarray, layout):
     cv2.fillConvexPoly(mask, tf(inner).astype(np.int32), 255)
     pockets = [p.astype(np.float32) for p in tf(six)]
     width_src = 0.5 * (np.linalg.norm(padded[1] - padded[0]) + np.linalg.norm(padded[2] - padded[3]))
-    return rect, mask, pockets, rm * rect.shape[1] / max(1.0, float(width_src))
+    return rect, mask, pockets, rm * rect.shape[1] / max(1.0, float(width_src)), H
 
 
 def _build_auto(src: np.ndarray):
@@ -344,14 +361,31 @@ def _build_auto(src: np.ndarray):
     inner = np.zeros_like(mask)
     cv2.fillConvexPoly(inner, cv2.perspectiveTransform(inner_quad[None].astype(np.float32), H)[0].astype(np.int32), 255)
     mask = cv2.bitwise_and(mask, inner)
-    return rect, mask, _pockets(rect, mask), 0.0
+    return rect, mask, _pockets(rect, mask), 0.0, H
+
+
+def _jpg(src: np.ndarray) -> bytes:
+    return cv2.imencode(".jpg", src, [cv2.IMWRITE_JPEG_QUALITY, 92])[1].tobytes()
+
+
+def src_of(sess: Session) -> np.ndarray:
+    return cv2.imdecode(np.frombuffer(sess.src_jpg, np.uint8), cv2.IMREAD_COLOR)
+
+
+def photo_session(src: np.ndarray, message: str) -> Session:
+    """Automatic detection failed: keep the photo so the user can tap the pockets and balls instead."""
+    h, w = src.shape[:2]
+    return Session(id=uuid.uuid4().hex[:12], mode="none", message=message, src_jpg=_jpg(src), src_size=(w, h))
 
 
 def analyze(data: bytes) -> Session:
-    src = decode_image(data)
+    return analyze_src(decode_image(data))
+
+
+def analyze_src(src: np.ndarray) -> Session:
     layout = _marker_layout(_find_markers(src))
     mode = "markers" if layout else "auto"
-    rect, mask, pockets, pocket_r = _build_markers(src, layout) if layout else _build_auto(src)
+    rect, mask, pockets, pocket_r, H = _build_markers(src, layout) if layout else _build_auto(src)
 
     balls = _hough_balls(rect, mask)
     if len(balls) >= 4:
@@ -369,10 +403,134 @@ def analyze(data: bytes) -> Session:
     if len(balls) < 2:
         raise AnalysisError("Couldn't find the balls. Use a sharper, brighter photo from above.")
     sess = Session(id=uuid.uuid4().hex[:12], rect=rect, table_mask=mask, pockets=pockets, balls=balls,
-                   felt_hsv=felt, mode=mode, pocket_r=pocket_r)
+                   felt_hsv=felt, mode=mode, pocket_r=pocket_r, H=H,
+                   src_jpg=_jpg(src), src_size=(src.shape[1], src.shape[0]))
     _assign_ids(sess, sess.balls)
     sess.history.append({"round": 0, "action": f"initial detection ({mode})", "balls": len(balls)})
     return sess
+
+
+# ---------------------------------------------------------------- manual (tap to place)
+
+def parse_kind(kind: str):
+    """'pocket3' -> ('pocket', 3); 'cue'; 'ball11' -> ('ball', 11); 'solid?' / 'stripe?' (number unknown)."""
+    k = (kind or "").strip().lower()
+    if k in ("cue", "solid?", "stripe?"):
+        return k, None
+    for pre, lo, hi in (("pocket", 1, 6), ("ball", 1, 15)):
+        if k.startswith(pre) and k[len(pre):].isdigit() and lo <= int(k[len(pre):]) <= hi:
+            return pre, int(k[len(pre):])
+    return None
+
+
+def _ball_from_kind(kind: str, n):
+    if kind == "cue":
+        return "cue", "CUE"
+    if kind == "ball":
+        return ("eight" if n == 8 else "solid" if n < 8 else "stripe"), f"#{n}"
+    return ("solid" if kind == "solid?" else "stripe"), None
+
+
+def build_manual(sess: Session, items: list[dict]) -> dict:
+    """Make the table and balls from the user's taps (x, y in the original photo, plus what each point is)."""
+    parsed, seen = [], set()
+    for it in items:
+        pk = parse_kind(it.get("kind", ""))
+        if pk is None:
+            raise AnalysisError(f"A point has no label yet. Pick what it is from its dropdown.")
+        if pk[1] is not None and pk in seen:
+            raise AnalysisError(f"{it['kind'].replace('ball', 'ball ').replace('pocket', 'pocket ')} is used twice.")
+        seen.add(pk)
+        parsed.append((it, pk))
+    pockets_in = [(it, pk) for it, pk in parsed if pk[0] == "pocket"]
+    if len(pockets_in) < 4:
+        raise AnalysisError("Tap at least the four corner pockets (any numbers) so the table can be straightened.")
+    layout = _layout_from_points(np.array([[it["x"], it["y"]] for it, _ in pockets_in], np.float32), allow_partial=True)
+    if layout is None:
+        raise AnalysisError("Those pockets don't make a table shape. Check that the four corners are spread out.")
+    src = src_of(sess)
+    h, w = src.shape[:2]
+    if cv2.contourArea(layout[0]) < 0.04 * h * w:
+        raise AnalysisError("The pockets are too close together. Tap the pocket centres, not the middle of the table.")
+    rect, mask, pockets, pocket_r, H = _build_markers(src, layout)
+
+    bi = [(it, pk) for it, pk in parsed if pk[0] != "pocket"]
+    if bi:
+        pr = cv2.perspectiveTransform(np.array([[it["x"], it["y"]] for it, _ in bi], np.float32)[None], H)[0]
+    Rg = 0.0125 * rect.shape[1]
+    balls = []
+    for (it, pk), (x, y) in zip(bi, pr if bi else []):
+        label, bid = _ball_from_kind(*pk)
+        b = v.Ball(center=np.array([x, y], dtype=np.float32), radius=Rg, mean_bgr=(0.0, 0.0, 0.0), label=label)
+        b.id = bid or ""
+        balls.append(b)
+    sess.rect, sess.table_mask, sess.pockets, sess.pocket_r, sess.H = rect, mask, pockets, pocket_r, H
+    sess.balls, sess.mode, sess.message = balls, "manual", ""
+    sess.felt_hsv, sess.suppressed, sess.round = _felt_hsv(rect, mask), [], 0
+
+    # Snap each tap to the real ball centre (a tap is a few pixels off); try a few ball sizes.
+    snapped = {}
+    for scale in (1.0, 0.8, 1.25, 1.55):
+        for b in balls:
+            b.radius = Rg * scale
+        for b in balls:
+            if id(b) in snapped:
+                continue
+            before = b.center.copy()
+            if _local_redetect(sess, b):
+                snapped[id(b)] = (b.center.copy(), b.radius)
+            else:
+                b.center = before
+    med = float(np.median([r for _, r in snapped.values()])) if len(snapped) >= 2 else Rg
+    for b in balls:
+        if id(b) in snapped:
+            b.center, b.radius = snapped[id(b)][0], snapped[id(b)][1]
+        else:
+            b.radius = med
+            b.mean_bgr = _patch_mean(rect, int(b.center[0]), int(b.center[1]), int(med))
+    _assign_ids(sess, balls)
+    sess.history.append({"round": 0, "action": "built from taps", "balls": len(balls)})
+    return {"pockets": len(pockets), "balls": len(balls), "snapped": len(snapped)}
+
+
+def prefill_items(sess: Session) -> list[dict]:
+    """The current detection as tap points in the original photo, so the user can start from it and fix it."""
+    if sess.H is None or sess.rect is None:
+        return []
+    Hi = np.linalg.inv(sess.H)
+    tf = lambda pts: cv2.perspectiveTransform(np.array(pts, np.float32)[None], Hi)[0]
+    out = []
+    if sess.pockets:
+        c0 = np.mean(sess.pockets, axis=0)
+        ring = sorted(sess.pockets, key=lambda p: math.atan2(p[1] - c0[1], p[0] - c0[0]))
+        for i, (x, y) in enumerate(tf(ring), 1):
+            out.append({"x": round(float(x), 1), "y": round(float(y), 1), "kind": f"pocket{i}"})
+    if sess.balls:
+        for b, (x, y) in zip(sess.balls, tf([b.center for b in sess.balls])):
+            kind = {"cue": "cue", "eight": "ball8", "solid": "solid?", "stripe": "stripe?"}.get(b.label, "solid?")
+            out.append({"x": round(float(x), 1), "y": round(float(y), 1), "kind": kind})
+    return out
+
+
+def _relabel(sess: Session) -> None:
+    """After a refine round. Automatic modes re-run the cue/8/stripe/solid guess; manual mode keeps the
+    user's labels and only guesses solid/stripe for balls found by 'look for missing'."""
+    if sess.mode != "manual":
+        for b in sess.balls:
+            b.label = "unknown"
+        v.classify_balls(sess.rect, sess.balls)
+        return
+    new = [b for b in sess.balls if b.label == "unknown"]
+    if not new:
+        return
+    cue = next((b for b in sess.balls if b.label == "cue"), None)
+    eight = next((b for b in sess.balls if b.label == "eight"), None)
+    if cue and eight:
+        v.classify_balls(sess.rect, [cue, eight, *new])
+        cue.label, eight.label = "cue", "eight"
+    for b in new:
+        if b.label in ("unknown", "cue", "eight"):
+            b.label = "solid"
 
 
 # ---------------------------------------------------------------- refine
@@ -477,9 +635,7 @@ def refine(sess: Session, improve: list[str], remove: list[str], find_missing: b
     if find_missing:
         report["added"] = _rescan(sess)
     # Re-label cue/eight/stripe/solid with the updated set; ids stay put, new balls get new ids.
-    for b in sess.balls:
-        b.label = "unknown"
-    v.classify_balls(sess.rect, sess.balls)
+    _relabel(sess)
     _assign_ids(sess, sess.balls)
     sess.round += 1
     sess.history.append({"round": sess.round, **{k: report[k] for k in ("removed", "improved", "unchanged", "added")}})

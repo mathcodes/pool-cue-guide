@@ -43,7 +43,11 @@ def test_bad_inputs():
     assert c.post("/api/sessions", files={"file": ("x.jpg", b"nope", "image/jpeg")}).status_code == 422
     assert c.get("/api/sessions/zzz").status_code == 404
     flat = cv2.imencode(".jpg", np.full((400, 600, 3), 90, np.uint8))[1].tobytes()
-    assert c.post("/api/sessions", files={"file": ("f.jpg", flat, "image/jpeg")}).status_code == 422
+    r = c.post("/api/sessions", files={"file": ("f.jpg", flat, "image/jpeg")})
+    assert r.status_code == 200 and r.json()["mode"] == "none"        # no table found -> tap it by hand
+    sid = r.json()["id"]
+    assert c.post(f"/api/sessions/{sid}/approve", json={"group": "open"}).status_code == 409   # needs points first
+    assert c.get(f"/api/sessions/{sid}/photo.jpg").status_code == 200
 
 
 def test_game_screenshot_whole_table():
@@ -91,3 +95,60 @@ def test_four_corner_markers_and_fallback():
     assert r.status_code in (200, 422)
     if r.status_code == 200:
         assert r.json()["mode"] == "auto"
+
+
+POCKETS = [(78, 75), (933, 55), (1790, 75), (1790, 958), (933, 965), (78, 958)]   # game_table.jpg, original pixels
+BALLS = {"cue": (762, 497), "ball8": (1426, 529), "ball11": (1090, 312), "ball2": (1370, 352), "ball9": (1374, 633)}
+
+
+K = 1600 / 1836   # the server keeps a photo at most 1600 px wide; the tap editor works in that space
+
+
+def _items(pockets=POCKETS, balls=BALLS):
+    pockets = [(x * K, y * K) for x, y in pockets]
+    balls = {k: (x * K, y * K) for k, (x, y) in balls.items()}
+    return [{"x": x, "y": y, "kind": f"pocket{i}"} for i, (x, y) in enumerate(pockets, 1)] + \
+           [{"x": x, "y": y, "kind": k} for k, (x, y) in balls.items()]
+
+
+def _photo_session():
+    flat = cv2.imencode(".jpg", cv2.imdecode(np.frombuffer(_fixture("game_table.jpg"), np.uint8), cv2.IMREAD_COLOR))[1].tobytes()
+    st = c.post("/api/sessions", files={"file": ("g.jpg", flat, "image/jpeg")}).json()
+    return st["id"], st
+
+
+def test_manual_taps_build_table_and_keep_labels():
+    sid, _ = _photo_session()
+    r = c.post(f"/api/sessions/{sid}/manual", json={"items": _items()})
+    assert r.status_code == 200, r.text
+    j = r.json()
+    assert j["mode"] == "manual" and j["pockets"] == 6 and len(j["balls"]) == 5
+    assert j["report"]["snapped"] == 5                                    # taps snapped to real ball centres
+    by = {b["id"]: b["label"] for b in j["balls"]}
+    assert by["CUE"] == "cue" and by["#8"] == "eight" and by["#11"] == "stripe" and by["#2"] == "solid"
+    # a review round must not relabel the user's choices
+    j2 = c.post(f"/api/sessions/{sid}/review", json={"improve": ["#11", "CUE"]}).json()
+    assert {b["id"]: b["label"] for b in j2["balls"]} == by
+    a = c.post(f"/api/sessions/{sid}/approve", json={"group": "open"}).json()
+    assert 1 <= len(a["options"]) <= 3
+
+
+def test_manual_four_corners_only_and_errors():
+    sid, _ = _photo_session()
+    corners = [POCKETS[i] for i in (0, 2, 3, 5)]
+    r = c.post(f"/api/sessions/{sid}/manual", json={"items": _items(corners)})
+    assert r.status_code == 200 and r.json()["pockets"] == 6               # middle pockets derived
+    # too few pockets / unlabeled / duplicate number -> clear 422s
+    assert c.post(f"/api/sessions/{sid}/manual", json={"items": _items(POCKETS[:3])}).status_code == 422
+    bad = _items(); bad[-1]["kind"] = ""
+    assert c.post(f"/api/sessions/{sid}/manual", json={"items": bad}).status_code == 422
+    dup = _items(); dup[-1]["kind"] = "ball8"
+    assert c.post(f"/api/sessions/{sid}/manual", json={"items": dup}).status_code == 422
+
+
+def test_prefill_round_trip():
+    sid = c.post("/api/sessions", files={"file": ("g.jpg", _fixture("game_table.jpg"), "image/jpeg")}).json()["id"]
+    items = c.get(f"/api/sessions/{sid}/prefill").json()["items"]
+    assert sum(i["kind"].startswith("pocket") for i in items) == 6 and len(items) == 21
+    j = c.post(f"/api/sessions/{sid}/manual", json={"items": items}).json()
+    assert j["mode"] == "manual" and len(j["balls"]) == 15

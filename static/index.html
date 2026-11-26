@@ -16,35 +16,42 @@ main{max-width:1100px;margin:0 auto;padding:16px;display:grid;gap:16px}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px}
 button,.btn{background:var(--acc);color:#04170d;border:0;border-radius:10px;padding:10px 16px;font-weight:600;font-size:16px;cursor:pointer}
 button.sec{background:transparent;color:var(--text);border:1px solid var(--line)}
+button.tab[aria-selected=true]{background:var(--acc);color:#04170d;border-color:var(--acc)}
 button:disabled{opacity:.5;cursor:not-allowed}
 .stage{position:relative;width:100%;max-width:900px;margin:auto}
 .stage img{display:block;width:100%;height:auto;border-radius:8px}
 .stage img.ov{position:absolute;inset:0}
+.tapstage{cursor:crosshair;touch-action:manipulation}
+.dot{position:absolute;transform:translate(-50%,-50%);min-width:24px;height:24px;border-radius:99px;display:grid;place-items:center;font:700 12px/1 system-ui;border:2px solid #fff;box-shadow:0 0 0 2px rgba(0,0,0,.55);cursor:pointer;padding:0 4px;color:#04170d}
+.dot.sel{outline:3px solid #ff3df0;outline-offset:2px}
 .review{display:grid;gap:16px}
 @media(min-width:900px){.review{grid-template-columns:1.6fr 1fr}}
 .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-input[type=text]{flex:1;min-width:140px;padding:10px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--text);font-size:16px}
+input[type=text],select{padding:9px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--text);font-size:16px}
+input[type=text]{flex:1;min-width:140px}
 table{width:100%;border-collapse:collapse;margin-top:10px}
-td,th{padding:8px 6px;border-bottom:1px solid var(--line);text-align:left}
+td,th{padding:6px;border-bottom:1px solid var(--line);text-align:left}
 th{font-size:13px;color:var(--mut);font-weight:600}
+tr.sel td{background:color-mix(in srgb,var(--acc) 14%,transparent)}
 td label{display:inline-flex;gap:6px;align-items:center;cursor:pointer}
-td input{width:20px;height:20px}
+td input[type=checkbox]{width:20px;height:20px}
 .chip{display:inline-block;padding:2px 8px;border-radius:99px;background:var(--bg);border:1px solid var(--line);font-size:13px}
 .mut{color:var(--mut);font-size:14px}.err{color:var(--bad)}.ok{color:var(--acc)}
 .opt{border:1px solid var(--line);border-radius:10px;padding:10px;margin-top:8px;cursor:pointer}
 .opt.on{border-color:var(--acc)}
 #drop{border:2px dashed var(--line);border-radius:12px;padding:28px;text-align:center}
+.plist{max-height:340px;overflow:auto}
 </style>
 </head>
 <body>
-<header><h1>🎱 Pool Cue Guide</h1><span class="mut">Upload a photo of the table, check the detected balls, approve, get 3 shot options.</span></header>
+<header><h1>🎱 Pool Cue Guide</h1><span class="mut">Upload a photo of the table, check the balls, approve, get 3 shot options.</span></header>
 <main>
 
 <section class="panel" id="upload">
   <div id="drop">
     <p><b>Photo of your table</b></p>
     <p class="mut">From above if you can, whole felt in view, even light. JPG or PNG, up to 12 MB.</p>
-    <p class="mut"><b>Best results:</b> cover the six pockets with bright green (neon) discs. The app uses their centres as the table outline.</p>
+    <p class="mut"><b>Best results:</b> cover the six pockets with bright green (neon) discs, <i>or</i> tap the pockets and balls yourself after uploading.</p>
     <input id="file" type="file" accept="image/*" capture="environment">
     <p><button id="go" disabled>Analyze photo</button></p>
     <p id="uerr" class="err" role="alert"></p>
@@ -52,31 +59,60 @@ td input{width:20px;height:20px}
 </section>
 
 <section id="review" class="review" hidden>
-  <div class="panel">
-    <div class="stage" id="stage"><img id="base" alt="Top-down view of the table"><img id="ov" class="ov" alt="Detected balls and shot lines"></div>
-    <p id="modenote" class="mut" role="status"></p>
-    <p class="mut" id="stagehint">Ball labels (B1, B2…) are drawn on the picture. Magenta rings mark balls on your list.</p>
+  <div class="panel" id="leftpanel">
+    <div class="row" role="tablist" style="margin-bottom:10px">
+      <button class="sec tab" id="tabAuto" role="tab" aria-selected="true" type="button">Detected view</button>
+      <button class="sec tab" id="tabTap" role="tab" aria-selected="false" type="button">✋ Tap to place</button>
+    </div>
+
+    <div id="autoStage">
+      <div class="stage" id="stage"><img id="base" alt="Top-down view of the table"><img id="ov" class="ov" alt="Detected balls and shot lines"></div>
+      <p id="modenote" class="mut" role="status"></p>
+      <p class="mut" id="stagehint">Ball labels are drawn on the picture. Magenta rings mark balls on your list.</p>
+    </div>
+
+    <div id="tapStage" hidden>
+      <div class="stage tapstage" id="tapbox"><img id="photo" alt="Your photo. Tap a pocket or ball to add a point." draggable="false"><div id="dots"></div></div>
+      <p class="mut" id="taphint">Tap each pocket and ball on the photo. Each tap adds a row on the right: choose what it is.</p>
+    </div>
   </div>
 
-  <div class="panel">
-    <h2 style="margin:0 0 6px;font-size:17px">Check the balls <span class="chip" id="round"></span></h2>
-    <p class="mut" style="margin-top:0">Type a ball label (like <b>B3</b>) and press Add, or tap one under <i>All detected balls</i>. Then tick <b>Improve</b> (re-detect it) or <b>Remove</b> (it isn't a ball).</p>
-    <form id="addf" class="row"><input id="lab" type="text" placeholder="B3, B7" autocomplete="off" aria-label="Ball labels"><button class="sec" type="submit">Add</button></form>
-    <table id="entries" hidden><thead><tr><th>Ball</th><th>Improve</th><th>Remove</th><th></th></tr></thead><tbody></tbody></table>
-    <div class="row" style="margin-top:12px">
-      <button id="rerun" disabled>Re-run on marked</button>
-      <button id="missing" class="sec">Look for missing balls</button>
+  <div>
+    <!-- Detected view controls -->
+    <div class="panel" id="autoPanel">
+      <h2 style="margin:0 0 6px;font-size:17px">Check the balls <span class="chip" id="round"></span></h2>
+      <p class="mut" style="margin-top:0">Type a ball label (like <b>B3</b> or <b>#11</b>) and press Add, or tap one under <i>All detected balls</i>. Then tick <b>Improve</b> (re-detect it) or <b>Remove</b> (it isn't a ball). Or use <b>Tap to place</b> to set everything by hand.</p>
+      <form id="addf" class="row"><input id="lab" type="text" placeholder="B3, #11" autocomplete="off" aria-label="Ball labels"><button class="sec" type="submit">Add</button></form>
+      <table id="entries" hidden><thead><tr><th>Ball</th><th>Improve</th><th>Remove</th><th></th></tr></thead><tbody></tbody></table>
+      <div class="row" style="margin-top:12px">
+        <button id="rerun" disabled>Re-run on marked</button>
+        <button id="missing" class="sec">Look for missing balls</button>
+      </div>
+      <p id="rep" class="mut" role="status"></p>
+      <details style="margin-top:8px"><summary class="mut">All detected balls</summary><div id="all" class="row" style="margin-top:8px"></div></details>
+      <hr style="border:0;border-top:1px solid var(--line);margin:14px 0">
+      <div class="row">
+        <label class="mut">Your group
+          <select id="group"><option value="open">Open table</option><option value="solid">Solids</option><option value="stripe">Stripes</option></select>
+        </label>
+        <button id="approve">Approved ✔</button>
+      </div>
+      <p id="aerr" class="err" role="alert"></p>
     </div>
-    <p id="rep" class="mut" role="status"></p>
-    <details style="margin-top:8px"><summary class="mut">All detected balls</summary><div id="all" class="row" style="margin-top:8px"></div></details>
-    <hr style="border:0;border-top:1px solid var(--line);margin:14px 0">
-    <div class="row">
-      <label class="mut">Your group
-        <select id="group"><option value="open">Open table</option><option value="solid">Solids</option><option value="stripe">Stripes</option></select>
-      </label>
-      <button id="approve">Approved ✔</button>
+
+    <!-- Tap to place controls -->
+    <div class="panel" id="tapPanel" hidden>
+      <h2 style="margin:0 0 6px;font-size:17px">Your points <span class="chip" id="tapcount">0</span></h2>
+      <p id="tapmsg" class="mut" style="margin-top:0"></p>
+      <p class="mut" style="margin-top:0">Number the pockets 1 to 6 however you like. You need <b>at least the four corner pockets</b>; middle pockets are optional.</p>
+      <div class="plist"><table id="ptable" hidden><thead><tr><th>#</th><th>What is it?</th><th></th></tr></thead><tbody></tbody></table></div>
+      <div class="row" style="margin-top:12px">
+        <button id="build" disabled>Build table from my points</button>
+        <button id="prefill" class="sec" type="button">Start from detected</button>
+        <button id="clear" class="sec" type="button">Clear</button>
+      </div>
+      <p id="terr" class="err" role="alert"></p>
     </div>
-    <p id="aerr" class="err" role="alert"></p>
   </div>
 </section>
 
@@ -91,7 +127,9 @@ td input{width:20px;height:20px}
 <script>
 const $=s=>document.querySelector(s);
 let sid=null, st=null, entries=new Map(), opt=0, opts=[];
+let pts=[], sel=-1, view='auto';
 
+/* ---------- upload ---------- */
 $('#file').onchange=()=>{$('#go').disabled=!$('#file').files.length};
 $('#go').onclick=async()=>{
   $('#uerr').textContent='';$('#go').disabled=true;$('#go').textContent='Analyzing…';
@@ -100,23 +138,45 @@ $('#go').onclick=async()=>{
     const r=await fetch('/api/sessions',{method:'POST',body:fd});
     const j=await r.json();
     if(!r.ok)throw new Error(j.detail||'Upload failed');
-    sid=j.id;st=j;entries=new Map();show();
+    sid=j.id;st=j;entries=new Map();pts=[];sel=-1;
     $('#upload').hidden=true;$('#review').hidden=false;
+    show();setView(st.mode==='none'?'tap':'auto');
   }catch(e){$('#uerr').textContent=e.message}
   $('#go').disabled=false;$('#go').textContent='Analyze photo';
 };
 
+/* ---------- views ---------- */
+function setView(v){
+  view=v;
+  const tap=v==='tap';
+  $('#autoStage').hidden=tap;$('#tapStage').hidden=!tap;
+  $('#autoPanel').hidden=tap;$('#tapPanel').hidden=!tap;
+  $('#tabAuto').setAttribute('aria-selected',!tap);$('#tabTap').setAttribute('aria-selected',tap);
+  $('#tabAuto').disabled=st.mode==='none';
+  if(tap){
+    $('#photo').src=`/api/sessions/${sid}/photo.jpg`;
+    $('#prefill').hidden=st.mode==='none';
+    $('#tapmsg').textContent=st.mode==='none'?(st.message||'Automatic detection could not read this photo, so place the points by hand.'):'';
+    drawPts();
+  }
+}
+$('#tabAuto').onclick=()=>setView('auto');
+$('#tabTap').onclick=()=>setView('tap');
+
+/* ---------- detected view (review loop) ---------- */
 function norm(x){return x.trim().toUpperCase().replace(/^BALL\s*/,'')}
 function ids(){return st.balls.map(b=>b.id)}
 function refresh(){
+  if(st.mode==='none')return;
   const pick=[...entries.keys()].join(',');
-  $('#base').src=`/api/sessions/${sid}/image.png?r=${st.round}`;
-  $('#ov').src=`/api/sessions/${sid}/overlay.png?r=${st.round}&option=${opt}&pick=${encodeURIComponent(pick)}`;
+  $('#base').src=`/api/sessions/${sid}/image.png?r=${st.round}&m=${st.mode}`;
+  $('#ov').src=`/api/sessions/${sid}/overlay.png?r=${st.round}&m=${st.mode}&option=${opt}&pick=${encodeURIComponent(pick)}`;
 }
 function show(){
-  $('#modenote').innerHTML=st.mode==='markers'
-    ? '<span class="ok">✔ Using the green pocket markers as the table outline ('+st.pockets+' pockets).</span>'
-    : 'No green pocket markers found, so the outline was guessed. Mark the six pockets bright green for a more exact result.';
+  const notes={markers:'✔ Using the green pocket markers as the table outline ('+st.pockets+' pockets).',
+    manual:'✔ Built from your tapped points.',
+    auto:'No green pocket markers found, so the outline was guessed. Mark the six pockets green, or use Tap to place, for a more exact result.'};
+  $('#modenote').innerHTML=st.mode==='auto'?notes.auto:`<span class="ok">${notes[st.mode]||''}</span>`;
   $('#round').textContent='Round '+st.round+' · '+st.balls.length+' balls';
   $('#all').innerHTML='';
   st.balls.forEach(b=>{const c=document.createElement('button');c.className='sec';c.type='button';c.style.padding='4px 10px';
@@ -153,7 +213,7 @@ async function post(path,body){
 function say(rep){
   const p=[];
   if(rep.improved.length)p.push('re-fit '+rep.improved.join(', '));
-  if(rep.unchanged.length)p.push('couldn\'t improve '+rep.unchanged.join(', ')+' (try Remove, or retake the photo)');
+  if(rep.unchanged.length)p.push('couldn\'t improve '+rep.unchanged.join(', ')+' (try Remove, or Tap to place)');
   if(rep.removed.length)p.push('removed '+rep.removed.join(', '));
   if(rep.added)p.push('found '+rep.added+' more');
   if(rep.unknown.length)p.push('unknown: '+rep.unknown.join(', '));
@@ -164,7 +224,7 @@ async function rerun(find){
   const improve=[],remove=[];entries.forEach((v,id)=>{if(v.remove)remove.push(id);else if(v.improve)improve.push(id)});
   try{
     const j=await post('review',{improve,remove,find_missing:!!find});
-    st=j;entries=new Map();$('#rep').textContent=say(j.report);show();
+    st=j;entries=new Map();$('#rep').textContent=say(j.report);$('#rep').className='mut';show();
   }catch(e){$('#rep').textContent=e.message;$('#rep').className='err'}
 }
 $('#rerun').onclick=()=>rerun(false);
@@ -179,7 +239,8 @@ $('#approve').onclick=async()=>{
   }catch(e){$('#aerr').textContent=e.message}
 };
 function drawOpts(){
-  $('#results').insertBefore($('#stage').parentElement,$('#opts'));
+  $('#results').insertBefore($('#leftpanel'),$('#opts'));
+  $('#tabAuto').parentElement.hidden=true;
   const box=$('#opts');box.innerHTML='';
   if(!opts.length)box.innerHTML='<p class="mut">No clear shot found. Try Back to review and fix any wrong balls.</p>';
   opts.forEach((o,i)=>{
@@ -192,8 +253,85 @@ function drawOpts(){
 }
 $('#back').onclick=()=>{
   opt=0;$('#stagehint').hidden=false;$('#results').hidden=true;$('#review').hidden=false;
-  $('#review').insertBefore($('#stage').parentElement,$('#review').firstChild);refresh();
+  $('#tabAuto').parentElement.hidden=false;
+  $('#review').insertBefore($('#leftpanel'),$('#review').firstChild);refresh();
 };
+
+/* ---------- tap to place ---------- */
+const GROUPS=[
+  ['Pockets',[1,2,3,4,5,6].map(n=>['pocket'+n,'Pocket '+n])],
+  ['Cue ball',[['cue','Cue ball']]],
+  ['Solids',[1,2,3,4,5,6,7].map(n=>['ball'+n,'Solid '+n])],
+  ['8-ball',[['ball8','8-ball (black)']]],
+  ['Stripes',[9,10,11,12,13,14,15].map(n=>['ball'+n,'Stripe '+n])],
+  ['Number unknown',[['solid?','Solid (any number)'],['stripe?','Stripe (any number)']]],
+];
+const short=k=>!k?'?':k.startsWith('pocket')?'P'+k.slice(6):k==='cue'?'Q':k.startsWith('ball')?k.slice(4):k==='solid?'?'S':'T';
+const dotColor=k=>!k?'#ff3df0':k.startsWith('pocket')?'#5cff6e':k==='cue'?'#ffffff':k==='ball8'?'#444':k==='stripe?'||(k.startsWith('ball')&&+k.slice(4)>8)?'#7fd3ff':'#ffc34d';
+const unique=k=>k&&k!=='solid?'&&k!=='stripe?';
+
+function natural(){return {w:st.src_width||$('#photo').naturalWidth||1,h:st.src_height||$('#photo').naturalHeight||1}}
+$('#tapbox').addEventListener('click',e=>{
+  if(e.target.closest('.dot'))return;
+  const r=$('#photo').getBoundingClientRect(), n=natural();
+  const x=(e.clientX-r.left)/r.width*n.w, y=(e.clientY-r.top)/r.height*n.h;
+  if(x<0||y<0||x>n.w||y>n.h)return;
+  pts.push({x:+x.toFixed(1),y:+y.toFixed(1),kind:''});sel=pts.length-1;$('#terr').textContent='';
+  drawPts();
+  const rows=$('#ptable tbody').querySelectorAll('select');if(rows.length)rows[rows.length-1].focus();
+});
+function usedKinds(except){return new Set(pts.filter((p,i)=>i!==except&&unique(p.kind)).map(p=>p.kind))}
+function drawPts(){
+  const n=natural(), dots=$('#dots');dots.innerHTML='';
+  pts.forEach((p,i)=>{
+    const d=document.createElement('div');d.className='dot'+(i===sel?' sel':'');
+    d.style.left=(p.x/n.w*100)+'%';d.style.top=(p.y/n.h*100)+'%';d.style.background=dotColor(p.kind);
+    d.textContent=short(p.kind);d.title='Point '+(i+1);
+    d.onclick=ev=>{ev.stopPropagation();sel=i;drawPts()};
+    dots.append(d);
+  });
+  const tb=$('#ptable tbody');tb.innerHTML='';
+  $('#ptable').hidden=!pts.length;
+  pts.forEach((p,i)=>{
+    const tr=document.createElement('tr');if(i===sel)tr.className='sel';
+    const used=usedKinds(i);
+    let opts='<option value="">Choose…</option>';
+    GROUPS.forEach(([g,list])=>{opts+=`<optgroup label="${g}">`+list.map(([k,l])=>`<option value="${k}" ${p.kind===k?'selected':''} ${used.has(k)?'disabled':''}>${l}</option>`).join('')+'</optgroup>'});
+    tr.innerHTML=`<td>${i+1}</td><td><select aria-label="What is point ${i+1}?">${opts}</select></td>
+      <td><button class="sec" type="button" style="padding:2px 10px" aria-label="Remove point ${i+1}">✕</button></td>`;
+    tr.onclick=()=>{if(sel!==i){sel=i;drawPts()}};
+    tr.querySelector('select').onchange=e=>{p.kind=e.target.value;$('#terr').textContent='';drawPts()};
+    tr.querySelector('button').onclick=ev=>{ev.stopPropagation();pts.splice(i,1);sel=Math.min(sel,pts.length-1);drawPts()};
+    tb.append(tr);
+  });
+  const corners=pts.filter(p=>p.kind.startsWith('pocket')).length, unassigned=pts.filter(p=>!p.kind).length;
+  $('#tapcount').textContent=pts.length;
+  $('#build').disabled=!(corners>=4&&!unassigned);
+  $('#taphint').textContent=corners<4
+    ? `Tap the pockets first: ${corners} of at least 4 placed (the four corners).`
+    : unassigned?`Choose what the ${unassigned} unlabeled point${unassigned>1?'s are':' is'}.`
+    : 'Now tap the cue ball and the other balls, then press Build.';
+}
+$('#clear').onclick=()=>{pts=[];sel=-1;$('#terr').textContent='';drawPts()};
+$('#prefill').onclick=async()=>{
+  $('#terr').textContent='';
+  try{
+    const r=await fetch(`/api/sessions/${sid}/prefill`);const j=await r.json();
+    pts=j.items;sel=-1;drawPts();
+    $('#tapmsg').textContent='Starting from the detected points. Fix any that are wrong, then Build.';
+  }catch(e){$('#terr').textContent='Could not load the detected points.'}
+};
+$('#build').onclick=async()=>{
+  $('#terr').textContent='';$('#build').disabled=true;
+  try{
+    const j=await post('manual',{items:pts.map(p=>({x:p.x,y:p.y,kind:p.kind}))});
+    st=j;entries=new Map();opt=0;show();setView('auto');
+    $('#rep').textContent=`Built from your points: ${j.report.balls} balls, ${j.report.pockets} pockets, ${j.report.snapped} snapped to the real ball centres.`;
+    $('#rep').className='mut';
+  }catch(e){$('#terr').textContent=e.message}
+  drawPts();
+};
+$('#photo').addEventListener('load',drawPts);
 </script>
 </body>
 </html>
