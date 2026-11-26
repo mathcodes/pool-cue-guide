@@ -21,3 +21,7 @@ Detection is heuristic (felt colour + Hough circles + colour blobs). Ratings and
 - Choose **Open table / Solids / Stripes** in the review step or on the results page; changing it re-ranks the options immediately.
 - Each option is replayed by a small physics simulator (ball-ball collisions, cushion bounces, rolling friction, pockets, cue-ball follow/draw). The overlay draws a **dotted line** for every ball that moves and a **dotted circle** where it stops (`IN` = pocketed). The card lists the effects in words (where the cue ball ends up, which balls are knocked where). Shots that scratch or fail to pot are dropped.
 - The simulator uses estimated constants, so treat paths as a guide, not a guarantee.
+
+## Random practice table
+
+Click **🎲 Random table** on the upload screen (or **New random table** while reviewing) to get a made-up table with randomly placed balls, drawn on `cueguide/assets/table_template.png`. Remove balls (tick Remove and Re-run, or delete a point in Tap to place) and add balls (tap the table and pick the ball), then Build and Approve as usual. API: `POST /api/random` with optional `{"balls": 6-16, "seed": n}`.

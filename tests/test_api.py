@@ -179,3 +179,16 @@ def test_simulate_cushion_and_friction():
     assert soft[0]["rails"] == 0
     hard = e.simulate(s, (0, -1), 22.0)["moves"][0]
     assert hard["rails"] >= 1 or hard["pocketed"]
+
+
+def test_random_table_endpoint_and_edit():
+    from fastapi.testclient import TestClient
+    from cueguide.app import app
+    c = TestClient(app)
+    j = c.post("/api/random", json={"balls": 10, "seed": 4}).json()
+    assert j["random"] and j["mode"] == "manual" and len(j["balls"]) == 10 and len(j["items"]) == 16
+    items = [i for i in j["items"] if i["kind"] != "ball8"]          # remove the 8, then rebuild
+    r = c.post(f"/api/sessions/{j['id']}/manual", json={"items": items})
+    assert r.status_code == 200 and len(r.json()["balls"]) == 9
+    a = c.post(f"/api/sessions/{j['id']}/approve", json={"group": "open"}).json()
+    assert a["options"]

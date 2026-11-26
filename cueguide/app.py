@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import engine
+from . import engine, randomtable
 
 MAX_UPLOAD = 12 * 1024 * 1024
 MAX_SESSIONS = 20
@@ -90,6 +90,28 @@ async def create(file: UploadFile = File(...)):
         SESSIONS.pop(min(SESSIONS, key=lambda k: SESSIONS[k].created), None)
     SESSIONS[s.id] = s
     return _state(s)
+
+
+class RandomReq(BaseModel):
+    balls: Optional[int] = Field(None, ge=6, le=16)
+    seed: Optional[int] = None
+
+
+@app.post("/api/random")
+def random_table(body: RandomReq = RandomReq()):
+    """A made-up practice table with randomly placed balls, ready to review, edit and approve."""
+    jpg, items = randomtable.make(body.seed, body.balls)
+    src = engine.decode_image(jpg)
+    s = engine.photo_session(src, "")
+    try:
+        engine.build_manual(s, items)
+    except engine.AnalysisError as e:
+        raise HTTPException(500, str(e))
+    s.message = "random"
+    if len(SESSIONS) >= MAX_SESSIONS:
+        SESSIONS.pop(min(SESSIONS, key=lambda k: SESSIONS[k].created), None)
+    SESSIONS[s.id] = s
+    return _state(s, {"random": True, "items": engine.prefill_items(s)})
 
 
 @app.get("/api/sessions/{sid}")
