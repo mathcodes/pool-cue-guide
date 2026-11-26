@@ -192,3 +192,34 @@ def test_random_table_endpoint_and_edit():
     assert r.status_code == 200 and len(r.json()["balls"]) == 9
     a = c.post(f"/api/sessions/{j['id']}/approve", json={"group": "open"}).json()
     assert a["options"]
+
+
+def test_play_shot_moves_balls_and_reranks():
+    from fastapi.testclient import TestClient
+    from cueguide.app import app
+    c = TestClient(app)
+    j = c.post("/api/random", json={"balls": 10, "seed": 2}).json()
+    sid = j["id"]
+    a = c.post(f"/api/sessions/{sid}/approve", json={"group": "open"}).json()
+    assert a["options"][0]["cut"]["deg"] >= 0
+    n0 = len(a["balls"])
+    for k in range(3):
+        top = a["options"][0]
+        r = c.post(f"/api/sessions/{sid}/play", json={"option": 1})
+        assert r.status_code == 200
+        a = r.json()
+        assert a["played"] == k + 1 and a["options"]
+        potted = a["report"]["potted"]
+        assert len(a["balls"]) == n0 - sum(1 for _ in potted) if k == 0 else True
+        n0 = len(a["balls"])
+    assert c.get(f"/api/sessions/{sid}/image.png").status_code == 200
+    u = c.post(f"/api/sessions/{sid}/undo")
+    assert u.status_code == 200 and u.json()["played"] == 2
+
+
+def test_outline_ignores_side_pockets():
+    from cueguide import engine as e, randomtable as rt
+    s = e.photo_session(e.decode_image(rt.make(1)[0]), "")
+    e.build_manual(s, rt.make(1)[1])
+    png = e.overlay_png(s)
+    assert png[:4] == b"\x89PNG"

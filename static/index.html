@@ -46,6 +46,8 @@ td input[type=checkbox]{width:20px;height:20px}
 .seg button[aria-checked=true]{background:#22c55e;color:#04210f;font-weight:700}
 .dots{letter-spacing:3px;font-weight:700}.ring{display:inline-block;width:12px;height:12px;border:2px dotted currentColor;border-radius:50%;vertical-align:-2px}
 .fx{margin:6px 0 0;padding-left:18px}.fx li{margin:2px 0}
+.optrow{display:flex;gap:12px;align-items:flex-start}.cut{flex:0 0 auto}.optbody{flex:1;min-width:0}
+.playbtn{margin-top:8px}
 </style>
 </head>
 <body>
@@ -125,6 +127,7 @@ td input[type=checkbox]{width:20px;height:20px}
   <h2 style="margin:0 0 6px;font-size:17px">Your 3 best options</h2>
   <div class="mut" style="margin-bottom:4px">You are shooting:</div><div class="seg" id="seg2" role="radiogroup" aria-label="Your group"></div>
   <p class="mut" style="margin:10px 0"><span class="dots">&middot;&middot;&middot;&middot;</span> dotted line = where a ball travels &nbsp; <span class="ring"></span> dotted circle = where it stops (IN = pocketed)</p>
+  <p id="playnote" class="mut" role="status" style="margin:6px 0"></p><button class="sec" id="undo" type="button" hidden>↶ Undo last shot</button>
   <div id="opts"></div>
   <p class="mut">Ratings are heuristic. Speed, spin and safety quality are estimates, not measurements.</p>
   <button class="sec" id="back">Back to review</button>
@@ -135,6 +138,7 @@ td input[type=checkbox]{width:20px;height:20px}
 const $=s=>document.querySelector(s);
 let grp='open';
 const SEGS=[['open','Open table'],['solid','Solids (1–7)'],['stripe','Stripes (9–15)']];
+let played=0;
 let sid=null, st=null, entries=new Map(), opt=0, opts=[];
 let pts=[], sel=-1, view='auto';
 
@@ -147,7 +151,7 @@ $('#go').onclick=async()=>{
     const r=await fetch('/api/sessions',{method:'POST',body:fd});
     const j=await r.json();
     if(!r.ok)throw new Error(j.detail||'Upload failed');
-    sid=j.id;st=j;entries=new Map();pts=[];sel=-1;
+    sid=j.id;st=j;entries=new Map();pts=[];sel=-1;played=0;
     $('#upload').hidden=true;$('#review').hidden=false;
     show();setView(st.mode==='none'?'tap':'auto');
   }catch(e){$('#uerr').textContent=e.message}
@@ -159,7 +163,7 @@ async function newRandom(){
   try{
     const r=await fetch('/api/random',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
     const j=await r.json();if(!r.ok)throw new Error(j.detail||'Could not make a table');
-    sid=j.id;st=j;entries=new Map();pts=j.items||[];sel=-1;opt=0;opts=[];
+    sid=j.id;st=j;entries=new Map();pts=j.items||[];sel=-1;opt=0;opts=[];played=0;
     $('#upload').hidden=true;$('#results').hidden=true;$('#review').hidden=false;$('#stagehint').hidden=false;
     $('#review').insertBefore($('#leftpanel'),$('#review').firstChild);$('#tabAuto').parentElement.hidden=false;
     $('#rand2').hidden=false;show();setView('auto');
@@ -275,19 +279,58 @@ async function approve(stay){
 }
 $('#approve').onclick=()=>approve(false);
 drawSegs();
+/* Ball-hit diagram (as in drdavepoolinfo.com): object ball behind, cue ball on top, seen along the cue's line.
+   Centres are 2r*sin(cut) apart sideways, so the overlap (the "fraction") is exactly 1 - sin(cut) of a diameter. */
+let _cid=0;
+const FRACS=[[1,'full'],[7/8,'7/8'],[3/4,'3/4'],[2/3,'2/3'],[1/2,'1/2'],[1/3,'1/3'],[1/4,'1/4'],[1/8,'1/8']];
+function fracLabel(f){
+  const m=FRACS.reduce((a,b)=>Math.abs(b[0]-f)<Math.abs(a[0]-f)?b:a);
+  return Math.abs(m[0]-f)<0.035?m[1]+' ball':Math.round(f*100)+'% ball';
+}
+function cutSvg(c){
+  if(!c)return '';
+  const id='cl'+(++_cid),r=24,t=c.deg*Math.PI/180,s=c.side,d=2*r*Math.sin(t),y=52;
+  const ox=75+s*d/2,cx=75-s*d/2;                       // object ball goes toward side s, cue ball sits the other way
+  const xl=Math.max(ox-r,cx-r),xr=Math.min(ox+r,cx+r),mid=(xl+xr)/2,f=Math.max(0,1-Math.sin(t));
+  return `<svg viewBox="0 0 150 112" width="150" height="112" role="img" aria-label="Cut angle ${c.deg} degrees: ${fracLabel(f)} hit">
+    <defs><clipPath id="${id}"><circle cx="${cx}" cy="${y}" r="${r}"/></clipPath></defs>
+    <circle cx="${ox}" cy="${y}" r="${r}" fill="#262626" stroke="#111" stroke-width="2"/>
+    <circle cx="${cx}" cy="${y}" r="${r}" fill="#fff" stroke="#111" stroke-width="2"/>
+    <circle cx="${ox}" cy="${y}" r="${r}" fill="none" stroke="#111" stroke-width="1.6" stroke-dasharray="1.5 3.2" clip-path="url(#${id})"/>
+    <circle cx="${mid}" cy="${y}" r="3.2" fill="#ef2d2d"/>
+    <g stroke="#555" stroke-width="1.2" fill="#555"><line x1="${xl}" y1="16" x2="${xr}" y2="16"/><line x1="${xl}" y1="10" x2="${xl}" y2="22"/><line x1="${xr}" y1="10" x2="${xr}" y2="22"/>${xr-xl>12?`<polygon points="${xl},16 ${xl+5},13.5 ${xl+5},18.5"/><polygon points="${xr},16 ${xr-5},13.5 ${xr-5},18.5"/>`:''}</g>
+    <text x="75" y="9" text-anchor="middle" font-size="11" fill="currentColor">${fracLabel(f).replace(' ball','')}</text>
+    <text x="75" y="95" text-anchor="middle" font-size="11" fill="currentColor">${fracLabel(f)} hit</text>
+    <text x="75" y="108" text-anchor="middle" font-size="10" fill="currentColor" opacity=".75">${c.deg}° cut, ${c.side>0?'right':'left'}</text></svg>`;
+}
+async function playShot(n){
+  try{
+    const j=await post('play',{option:n});
+    st=j;opts=j.options;opt=opts.length?1:0;played=j.played||0;
+    $('#playnote').textContent=(j.report&&j.report.potted.length?`Potted ${j.report.potted.join(', ')}. `:'Played. ')+`Shot ${played}. `+(j.note||'');
+    show();drawOpts();refresh();$('#stage').scrollIntoView({behavior:'smooth'});
+  }catch(e){$('#playnote').textContent=e.message}
+}
+async function undoShot(){
+  try{const j=await post('undo',{});st=j;opts=j.options;opt=opts.length?1:0;played=j.played||0;$('#playnote').textContent='Undid the last shot.';show();drawOpts();refresh()}
+  catch(e){$('#playnote').textContent=e.message}
+}
 function drawOpts(){
+  $('#undo').hidden=!played;
   $('#results').insertBefore($('#leftpanel'),$('#opts'));
   $('#tabAuto').parentElement.hidden=true;
   const box=$('#opts');box.innerHTML='';
   if(!opts.length)box.innerHTML='<p class="mut">No clear shot found. Try Back to review and fix any wrong balls.</p>';
   opts.forEach((o,i)=>{
     const d=document.createElement('div');d.className='opt'+(opt===i+1?' on':'');d.tabIndex=0;
-    d.innerHTML=`<b>#${o.rank} ${o.kind==='defense'?'🛡 Safety':'🎯 Pot'}</b> <span class="chip">rating ${o.rating}</span><div>${o.summary}</div>${(o.effects&&o.effects.length)?'<ul class="fx">'+o.effects.map(x=>'<li>'+x+'</li>').join('')+'</ul>':''}`;
+    d.innerHTML=`<div class="optrow"><div class="cut">${cutSvg(o.cut)}</div><div class="optbody"><b>#${o.rank} ${o.kind==='defense'?'🛡 Safety':'🎯 Pot'}</b> <span class="chip">rating ${o.rating}</span><div>${o.summary}</div>${(o.effects&&o.effects.length)?'<ul class="fx">'+o.effects.map(x=>'<li>'+x+'</li>').join('')+'</ul>':''}<button class="playbtn" type="button">▶ Play this shot</button></div></div>`;
+    d.querySelector('.playbtn').onclick=ev=>{ev.stopPropagation();playShot(i+1)};
     const pick=()=>{opt=i+1;drawOpts();refresh()};
     d.onclick=pick;d.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();pick()}};
     box.append(d);
   });
 }
+$('#undo').onclick=undoShot;
 $('#back').onclick=()=>{
   opt=0;$('#stagehint').hidden=false;$('#results').hidden=true;$('#review').hidden=false;
   $('#tabAuto').parentElement.hidden=false;

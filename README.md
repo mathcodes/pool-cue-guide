@@ -25,3 +25,9 @@ Detection is heuristic (felt colour + Hough circles + colour blobs). Ratings and
 ## Random practice table
 
 Click **🎲 Random table** on the upload screen (or **New random table** while reviewing) to get a made-up table with randomly placed balls, drawn on `cueguide/assets/table_template.png`. Remove balls (tick Remove and Re-run, or delete a point in Tap to place) and add balls (tap the table and pick the ball), then Build and Approve as usual. API: `POST /api/random` with optional `{"balls": 6-16, "seed": n}`.
+
+## Playing shots and ball-hit diagrams
+
+- **▶ Play this shot** moves every ball to where the simulation left it (pocketed balls leave the table), then ranks three new options for the new layout. Repeat as long as you like; **Undo last shot** steps back.
+- Each option shows a ball-hit diagram: the object ball behind, the cue ball in front, the object ball's edge dotted inside the overlap, and a dimension line for the fraction. The overlap is exact: centres are 2r·sin(cut) apart, so the hit fraction is 1 − sin(cut) of a ball diameter (30° = 1/2 ball, 14.5° = 3/4, 48.6° = 1/4).
+- The green table outline now runs through the four corner pockets only, so it stays straight.

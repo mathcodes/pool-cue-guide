@@ -21,6 +21,7 @@ STATIC = Path(__file__).resolve().parent.parent / "static"
 app = FastAPI(title="Pool Cue Guide")
 SESSIONS: dict[str, engine.Session] = {}
 OPTIONS: dict[str, list] = {}
+GROUPS: dict[str, str] = {}
 
 
 class Review(BaseModel):
@@ -114,6 +115,40 @@ def random_table(body: RandomReq = RandomReq()):
     return _state(s, {"random": True, "items": engine.prefill_items(s)})
 
 
+class Play(BaseModel):
+    option: int = Field(ge=1, le=10)
+
+
+@app.post("/api/sessions/{sid}/play")
+def play(sid: str, body: Play):
+    """Execute one of the suggested shots: balls move to the simulated end positions, then re-rank."""
+    s = _ready(_get(sid))
+    opts = OPTIONS.get(sid, [])
+    if not 1 <= body.option <= len(opts):
+        raise HTTPException(409, "Approve first to get shot options.")
+    try:
+        report = engine.play(s, opts[body.option - 1])
+    except engine.AnalysisError as e:
+        raise HTTPException(409, str(e))
+    group = GROUPS.get(sid, "open")
+    shots = engine.top_shots(s, group)
+    OPTIONS[sid] = shots
+    left = [b for b in s.balls if b.label not in ("cue",)]
+    msg = "" if shots else ("Table cleared." if not left else "No clear shot from here.")
+    return _state(s, {"approved": True, "group": group, "options": shots, "played": s.played, "report": report, "note": msg})
+
+
+@app.post("/api/sessions/{sid}/undo")
+def undo(sid: str):
+    s = _ready(_get(sid))
+    if not engine.undo(s):
+        raise HTTPException(409, "Nothing to undo.")
+    group = GROUPS.get(sid, "open")
+    shots = engine.top_shots(s, group)
+    OPTIONS[sid] = shots
+    return _state(s, {"approved": True, "group": group, "options": shots, "played": s.played})
+
+
 @app.get("/api/sessions/{sid}")
 def state(sid: str):
     return _state(_get(sid))
@@ -121,7 +156,7 @@ def state(sid: str):
 
 @app.get("/api/sessions/{sid}/image.png")
 def image(sid: str):
-    ok, buf = cv2.imencode(".png", _ready(_get(sid)).rect)
+    ok, buf = cv2.imencode(".png", engine.render_base(_ready(_get(sid))))
     return Response(buf.tobytes(), media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
@@ -172,6 +207,7 @@ def approve(sid: str, body: Approve):
         raise HTTPException(409, "No cue ball is marked. Improve or add the cue ball first.")
     shots = engine.top_shots(s, body.group)
     OPTIONS[sid] = shots
+    GROUPS[sid] = body.group
     return _state(s, {"approved": True, "group": body.group, "options": shots})
 
 

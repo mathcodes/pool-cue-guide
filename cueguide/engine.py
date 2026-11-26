@@ -38,6 +38,9 @@ class Session:
     src_size: tuple = (0, 0)    # (w, h) of that original: coordinates the tap editor uses
     H: Optional[np.ndarray] = None   # original -> rectified homography
     message: str = ""
+    clean: Optional[np.ndarray] = None   # table with the balls erased (after the first played shot)
+    played: int = 0
+    snaps: list = field(default_factory=list)  # undo stack of (balls, round)
 
 
 class AnalysisError(Exception):
@@ -655,10 +658,15 @@ def overlay_png(sess: Session, option: Optional[dict] = None, pick: Optional[lis
     h, w = sess.rect.shape[:2]
     img = np.zeros((h, w, 4), np.uint8)
     GREEN = (90, 255, 100, 255)
-    if len(sess.pockets) >= 3:
-        c0 = np.mean(sess.pockets, axis=0)
+    P = np.array(sess.pockets, float) if len(sess.pockets) else np.zeros((0, 2))
+    if len(P) >= 4:  # outline through the four corner pockets only (side pockets don't bend it)
+        idx = [int(np.argmin(P.sum(1))), int(np.argmax(P[:, 0] - P[:, 1])), int(np.argmax(P.sum(1))), int(np.argmax(P[:, 1] - P[:, 0]))]
+        if len(set(idx)) == 4:
+            cv2.polylines(img, [np.array([_pt(P[i]) for i in idx], np.int32)], True, GREEN, 2, cv2.LINE_AA)
+    elif len(P) >= 3:
+        c0 = P.mean(axis=0)
         ring = sorted(sess.pockets, key=lambda p: math.atan2(p[1] - c0[1], p[0] - c0[0]))
-        cv2.polylines(img, [np.array([_pt(p) for p in ring], np.int32)], True, GREEN, 2, cv2.LINE_AA)  # table outline
+        cv2.polylines(img, [np.array([_pt(p) for p in ring], np.int32)], True, GREEN, 2, cv2.LINE_AA)
     pr = int(sess.pocket_r) if sess.pocket_r else 20
     for p in sess.pockets:
         cv2.circle(img, _pt(p), pr, GREEN, 3, cv2.LINE_AA)
@@ -844,6 +852,130 @@ def _defense(sess: Session, group: str) -> list[dict]:
         if best:
             out.append(best)
     return sorted(out, key=lambda o: -o["raw"])
+
+
+# ---------------------------------------------------------------- play a shot
+
+_NUMCOL = {1: (40, 200, 235), 2: (200, 70, 30), 3: (40, 40, 210), 4: (130, 40, 100),
+           5: (30, 130, 240), 6: (50, 140, 30), 7: (30, 30, 120), 8: (15, 15, 15)}
+
+
+def _ball_number(b):
+    t = (b.id or "").lstrip("#")
+    return int(t) if t.isdigit() and 1 <= int(t) <= 15 else None
+
+
+def _draw_disc(img, b):
+    c, r = _pt(b.center), int(round(b.radius))
+    n = _ball_number(b)
+    if b.label == "cue":
+        base = (240, 240, 240)
+    elif b.label == "eight":
+        base = _NUMCOL[8]
+    else:
+        base = _NUMCOL[(n if n and n <= 8 else (n - 8 if n else 6))] if n or b.label else (120, 120, 120)
+        if n is None:
+            base = (50, 140, 30) if b.label == "solid" else (200, 70, 30)
+    cv2.circle(img, (c[0] + 3, c[1] + 4), r, (35, 70, 30), -1, cv2.LINE_AA)
+    cv2.circle(img, c, r, base, -1, cv2.LINE_AA)
+    if b.label == "stripe":
+        cv2.rectangle(img, (c[0] - r + 1, c[1] - int(r * .42)), (c[0] + r - 1, c[1] + int(r * .42)), (245, 245, 245), -1)
+        cv2.circle(img, c, r, base, 2, cv2.LINE_AA)
+    if b.label != "cue":
+        cv2.circle(img, c, max(3, int(r * .42)), (245, 245, 245), -1, cv2.LINE_AA)
+        if n:
+            cv2.putText(img, str(n), (c[0] - (int(r * .38) if n > 9 else int(r * .2)), c[1] + int(r * .2)),
+                        cv2.FONT_HERSHEY_SIMPLEX, r / 62.0 + .2, (20, 20, 20), 1, cv2.LINE_AA)
+    cv2.circle(img, (c[0] - r // 3, c[1] - r // 3), max(2, r // 6), (255, 255, 255), -1, cv2.LINE_AA)
+
+
+def render_base(sess: Session) -> np.ndarray:
+    """The picture under the overlay: the photo, or (after a played shot) the table with redrawn balls."""
+    if sess.clean is None:
+        return sess.rect
+    img = sess.clean.copy()
+    for b in sess.balls:
+        _draw_disc(img, b)
+    return img
+
+
+def _erase_balls(sess: Session) -> np.ndarray:
+    """Paint over every ball (and its shadow) with the local felt colour, feathered so no outline shows."""
+    img = sess.rect.copy()
+    mask = np.zeros(img.shape[:2], np.uint8)
+    W = img.shape[1]
+    for b in sess.balls:
+        e = int(max(b.radius * 2.0, 0.03 * W))   # detected radius can undershoot the real ball, so erase generously
+        cv2.circle(mask, _pt(b.center), e, 255, -1)
+        cv2.circle(mask, (int(b.center[0] + e * .25), int(b.center[1] + e * .3)), e, 255, -1)  # shadow
+    felt = sess.table_mask > 0 if sess.table_mask is not None else np.ones(mask.shape, bool)
+    ok = felt & (mask == 0)
+    col = np.median(img[ok], axis=0) if ok.sum() > 100 else np.array([90, 140, 60])
+    # Anything non-felt that is still touching a ball's neighbourhood (shadow edges, highlights) goes too.
+    dist = np.linalg.norm(img.astype(np.float32) - col[None, None, :].astype(np.float32), axis=2)
+    resid = ((dist > 22) & felt).astype(np.uint8) * 255
+    resid = cv2.morphologyEx(resid, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    n, lab, stats, cen = cv2.connectedComponentsWithStats(resid)
+    for i in range(1, n):
+        if stats[i, 4] < 30:
+            continue
+        near = any(math.hypot(cen[i][0] - b.center[0], cen[i][1] - b.center[1]) < 0.05 * W for b in sess.balls) \
+            and stats[i, 4] < 0.012 * img.shape[0] * W
+        if near:
+            mask[lab == i] = 255
+    mask = cv2.dilate(mask, np.ones((7, 7), np.uint8))
+    soft = cv2.GaussianBlur(mask, (0, 0), max(3.0, sess.balls[0].radius * 0.25) if sess.balls else 4.0)[..., None] / 255.0
+    soft = np.maximum(soft, (mask[..., None] / 255.0) * 0.0)
+    out = img * (1 - soft) + col[None, None, :] * soft
+    return out.astype(np.uint8)
+
+
+def play(sess: Session, option: dict) -> dict:
+    """Carry out a suggested shot: move every ball to where the simulation left it, remove pocketed balls."""
+    import copy
+    sim = option.get("sim")
+    if not sim:
+        raise AnalysisError("That option has no simulation to play.")
+    sess.snaps.append((copy.deepcopy(sess.balls), sess.round))
+    if sess.clean is None:
+        sess.clean = _erase_balls(sess)
+    potted = []
+    for m in sim["moves"]:
+        b = _ball_by_id(sess, m["id"])
+        if b is None:
+            continue
+        if m["pocketed"]:
+            sess.balls.remove(b)
+            potted.append(b.id)
+        else:
+            b.center = np.array(m["end"], np.float32)
+    sess.round += 1
+    sess.played += 1
+    sess.history.append({"round": sess.round, "action": f"played: {option.get('summary', '')}", "potted": potted})
+    return {"potted": potted, "summary": option.get("summary", "")}
+
+
+def undo(sess: Session) -> bool:
+    if not sess.snaps:
+        return False
+    sess.balls, sess.round = sess.snaps.pop()
+    sess.played = max(0, sess.played - 1)
+    if sess.played == 0:
+        sess.clean = None
+    return True
+
+
+def _cut_info(sess, o, cue):
+    """Cut angle and side from the simulated contact: cue travel vs the line of centres at impact."""
+    sim, tb = o.get("sim"), next((b for b in sess.balls if b.id == o["target"]), None)
+    if not sim or not sim.get("ghost") or tb is None:
+        return None
+    g = np.array(sim["ghost"], float)
+    cd, od = _unit(g - np.array(cue.center, float)), _unit(np.array(tb.center, float) - g)
+    cosv = float(np.clip(np.dot(cd, od), -1, 1))
+    deg = math.degrees(math.acos(cosv))
+    side = 1 if (cd[0] * od[1] - cd[1] * od[0]) > 0 else -1   # +1: object ball goes right of the cue line
+    return {"deg": round(deg, 1), "side": side, "overlap": round(100 * (1 - math.sin(math.radians(deg))), 1)}
 
 
 # ---------------------------------------------------------------- simulation
@@ -1162,6 +1294,7 @@ def top_shots(sess: Session, group: str = "open", n: int = 3) -> list[dict]:
         o["rank"] = i
         o["summary"] = _describe(o)
         o["effects"] = _effects(sess, o["sim"], R)
+        o["cut"] = _cut_info(sess, o, cue)
         o["legend"] = [{"id": m["id"], "label": m["label"], "pocketed": m["pocketed"]} for m in o["sim"]["moves"]]
         o.pop("raw", None)
     return chosen
