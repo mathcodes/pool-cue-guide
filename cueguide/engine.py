@@ -686,22 +686,53 @@ def _pt(p):
     return (int(round(p[0])), int(round(p[1])))
 
 
-def _draw_option(img, sess, o):
-    cue = next((b for b in sess.balls if b.label == "cue"), None)
-    if cue is None:
+def _dotted(img, pts, col, step=11.0, rad=2):
+    """Dotted polyline: a dot every `step` px along the path (dark halo so it reads on any felt/photo)."""
+    if len(pts) < 2:
         return
-    c, g = _pt(cue.center), _pt(o["ghost"])
-    cv2.arrowedLine(img, c, g, (255, 255, 255, 255), 3, cv2.LINE_AA, tipLength=0.04)
-    cv2.circle(img, g, 6, (255, 255, 255, 255), -1, cv2.LINE_AA)
-    if o["kind"] == "offense":
-        cv2.line(img, g, _pt(o["ball"]), (255, 120, 0, 255), 2, cv2.LINE_AA)
-        cv2.line(img, _pt(o["ball"]), _pt(o["pocket"]), (60, 60, 255, 255), 3, cv2.LINE_AA)
-        cv2.circle(img, _pt(o["pocket"]), 8, (60, 60, 255, 255), -1, cv2.LINE_AA)
-    else:
-        cv2.line(img, g, _pt(o["ball"]), (255, 120, 0, 255), 2, cv2.LINE_AA)
-        cv2.line(img, _pt(o["ball"]), _pt(o["object_end"]), (255, 120, 0, 255), 2, cv2.LINE_AA)
-        cv2.line(img, g, _pt(o["cue_end"]), (255, 0, 255, 255), 3, cv2.LINE_AA)
-        cv2.circle(img, _pt(o["cue_end"]), int(cue.radius), (255, 0, 255, 255), 2, cv2.LINE_AA)
+    P = np.array(pts, float)
+    seg = np.linalg.norm(np.diff(P, axis=0), axis=1)
+    cum = np.concatenate([[0], np.cumsum(seg)])
+    for d in np.arange(0, cum[-1] + 1e-6, step):
+        i = min(int(np.searchsorted(cum, d, side="right")) - 1, len(seg) - 1)
+        t = (d - cum[i]) / (seg[i] or 1.0)
+        q = P[i] + (P[i + 1] - P[i]) * min(1.0, t)
+        cv2.circle(img, _pt(q), rad + 1, (0, 0, 0, 230), -1, cv2.LINE_AA)
+        cv2.circle(img, _pt(q), rad, col, -1, cv2.LINE_AA)
+
+
+def _dotted_circle(img, c, r, col, n=18, rad=2):
+    for i in range(n):
+        a = 2 * math.pi * i / n
+        q = (c[0] + r * math.cos(a), c[1] + r * math.sin(a))
+        cv2.circle(img, _pt(q), rad + 1, (0, 0, 0, 230), -1, cv2.LINE_AA)
+        cv2.circle(img, _pt(q), rad, col, -1, cv2.LINE_AA)
+
+
+def _draw_option(img, sess, o):
+    """Every ball the shot moves: dotted path + dotted ball where it stops (or goes down)."""
+    sim = o.get("sim")
+    if not sim:
+        return
+    R = float(np.median([b.radius for b in sess.balls])) if sess.balls else 14.0
+    for m in sim["moves"]:
+        col = _COL.get(m["label"], _COL["unknown"])
+        _dotted(img, m["path"], col)
+        end = m["end"]
+        if m["pocketed"]:
+            _dotted_circle(img, end, R * 0.8, col)
+            cv2.putText(img, "IN", (int(end[0]) - 9, int(end[1]) + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                        (255, 255, 255, 255), 2, cv2.LINE_AA)
+        else:
+            _dotted_circle(img, end, R, col)
+            tx = f"{m['id']}"
+            (tw, th), _ = cv2.getTextSize(tx, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
+            cv2.putText(img, tx, (int(end[0]) - tw // 2, int(end[1]) + th // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.42,
+                        (255, 255, 255, 255), 1, cv2.LINE_AA)
+    g = sim.get("ghost")
+    if g:  # where the cue ball is when it touches the object ball
+        _dotted_circle(img, g, R, (255, 255, 255, 255), n=14, rad=1)
+
 
 
 # ---------------------------------------------------------------- shot picking
@@ -815,6 +846,266 @@ def _defense(sess: Session, group: str) -> list[dict]:
     return sorted(out, key=lambda o: -o["raw"])
 
 
+# ---------------------------------------------------------------- simulation
+
+A_ROLL = 0.06     # rolling deceleration, px/step^2
+E_BALL = 0.96     # ball-ball restitution
+E_RAIL = 0.78     # cushion restitution
+V_MAX = 22.0
+
+
+def _bounds(sess, R):
+    P = np.array(sess.pockets, float)
+    return (P[:, 0].min() + R, P[:, 1].min() + R, P[:, 0].max() - R, P[:, 1].max() - R)
+
+
+def simulate(sess: Session, cue_dir, v0: float, spin: float = 0.0, max_steps: int = 6000) -> dict:
+    """Replay one stroke. Positions in rectified px. spin: >0 follow, 0 stun, <0 draw (cue ball only)."""
+    R = float(np.median([b.radius for b in sess.balls]))
+    x0, y0, x1, y1 = _bounds(sess, R)
+    cap = 1.5 * max(sess.pocket_r or 0, 1.5 * R)
+    P = [np.array(p, float) for p in sess.pockets]
+    balls = sess.balls
+    n = len(balls)
+    pos = np.array([b.center for b in balls], float)
+    vel = np.zeros((n, 2))
+    ci = next(i for i, b in enumerate(balls) if b.label == "cue")
+    vel[ci] = _unit(np.array(cue_dir, float)) * v0
+    alive = [True] * n
+    pocket_of = {}
+    paths = [[pos[i].copy()] for i in range(n)]
+    last_rec = pos.copy()
+    contacts, rails = [], [0] * n
+    touched = set()
+    spun = False
+    sub = max(1, int(math.ceil(v0 / 5.0)))
+    dt = 1.0 / sub
+    for step in range(max_steps * sub):
+        mov = [i for i in range(n) if alive[i] and np.linalg.norm(vel[i]) > 1e-3]
+        if not mov:
+            break
+        for i in mov:
+            sp = np.linalg.norm(vel[i])
+            vel[i] *= max(0.0, sp - A_ROLL * dt) / sp
+            pos[i] += vel[i] * dt
+        for i in mov:
+            if not alive[i]:
+                continue
+            for k, pk in enumerate(P):  # pocket capture
+                if np.linalg.norm(pos[i] - pk) < cap:
+                    alive[i] = False
+                    pocket_of[i] = k
+                    pos[i] = pk
+                    vel[i] = 0
+                    paths[i].append(pk.copy())
+                    break
+            if not alive[i]:
+                continue
+            for ax, lo, hi in ((0, x0, x1), (1, y0, y1)):  # cushions
+                if pos[i][ax] < lo:
+                    pos[i][ax] = lo + (lo - pos[i][ax]); vel[i][ax] = abs(vel[i][ax]) * E_RAIL; rails[i] += 1
+                    paths[i].append(pos[i].copy()); last_rec[i] = pos[i]
+                elif pos[i][ax] > hi:
+                    pos[i][ax] = hi - (pos[i][ax] - hi); vel[i][ax] = -abs(vel[i][ax]) * E_RAIL; rails[i] += 1
+                    paths[i].append(pos[i].copy()); last_rec[i] = pos[i]
+        for i in mov:  # ball-ball
+            if not alive[i]:
+                continue
+            for j in range(n):
+                if j == i or not alive[j]:
+                    continue
+                d = pos[j] - pos[i]
+                dist = float(np.linalg.norm(d))
+                if dist >= 2 * R or dist < 1e-6:
+                    continue
+                nrm = d / dist
+                rel = float(np.dot(vel[i] - vel[j], nrm))
+                if rel <= 0:
+                    continue
+                if j in mov and j < i:
+                    continue  # pair handled once
+                imp = (1 + E_BALL) / 2 * rel
+                vi_before = vel[i].copy()
+                vel[i] -= imp * nrm
+                vel[j] += imp * nrm
+                overlap = 2 * R - dist
+                pos[i] -= nrm * overlap / 2
+                pos[j] += nrm * overlap / 2
+                if ci in (i, j) and not spun:
+                    c, o = (i, j) if i == ci else (j, i)
+                    contacts.append({"a": balls[c].id, "b": balls[o].id, "at": pos[c].tolist()})
+                    spun = True
+                    if i == ci:
+                        vel[ci] += spin * abs(float(np.dot(vi_before, nrm))) * nrm
+                elif (balls[i].id, balls[j].id) not in touched and (balls[j].id, balls[i].id) not in touched:
+                    contacts.append({"a": balls[i].id, "b": balls[j].id, "at": pos[i].tolist()})
+                touched.add((balls[i].id, balls[j].id))
+                paths[i].append(pos[i].copy()); paths[j].append(pos[j].copy())
+                last_rec[i] = pos[i]; last_rec[j] = pos[j]
+        for i in mov:
+            if alive[i] and np.linalg.norm(pos[i] - last_rec[i]) >= 6:
+                paths[i].append(pos[i].copy()); last_rec[i] = pos[i].copy()
+    moves = []
+    for i in range(n):
+        if np.linalg.norm(pos[i] - np.array(balls[i].center)) < 0.5 * R and i not in pocket_of:
+            continue
+        pth = paths[i] + ([pos[i].copy()] if i not in pocket_of else [])
+        moves.append({"id": balls[i].id, "label": balls[i].label, "path": [[float(a), float(b)] for a, b in pth],
+                      "start": [float(balls[i].center[0]), float(balls[i].center[1])],
+                      "end": [float(pos[i][0]), float(pos[i][1])], "pocketed": i in pocket_of,
+                      "pocket": pocket_of.get(i), "rails": rails[i]})
+    moves.sort(key=lambda m: m["label"] != "cue")
+    cm = next((m for m in moves if m["label"] == "cue"), None)
+    return {"moves": moves, "contacts": contacts, "cue_scratch": bool(cm and cm["pocketed"]),
+            "first": contacts[0]["b"] if contacts and contacts[0]["a"] == balls[ci].id else None,
+            "ghost": contacts[0]["at"] if contacts and contacts[0]["a"] == balls[ci].id else None}
+
+
+def _pocket_name(sess, k):
+    P = np.array(sess.pockets, float)
+    c = P.mean(axis=0)
+    p = P[k]
+    dx, dy = p[0] - c[0], p[1] - c[1]
+    span_x = (P[:, 0].max() - P[:, 0].min()) or 1
+    side = abs(dx) < 0.2 * span_x
+    v_ = "top" if dy < 0 else "bottom"
+    if side:
+        return f"{v_} side pocket"
+    return f"{v_}-{'left' if dx < 0 else 'right'} corner"
+
+
+def _zone(sess, p, R):
+    x0, y0, x1, y1 = _bounds(sess, R)
+    fx, fy = (p[0] - x0) / max(1, x1 - x0), (p[1] - y0) / max(1, y1 - y0)
+    h_ = "left" if fx < 0.33 else "right" if fx > 0.67 else "centre"
+    v_ = "top" if fy < 0.33 else "bottom" if fy > 0.67 else "middle"
+    name = "centre of the table" if (h_, v_) == ("centre", "middle") else (
+        f"{v_} {h_}" if v_ != "middle" and h_ != "centre" else (f"{v_} centre" if h_ == "centre" else f"{h_} side"))
+    rail = min(p[0] - x0, x1 - p[0], p[1] - y0, y1 - p[1]) < 1.6 * R
+    return name + (" (on the rail)" if rail else "")
+
+
+def _effects(sess, sim, R) -> list:
+    out = []
+    first = sim.get("first")
+    for m in sim["moves"]:
+        if m["label"] == "cue":
+            if m["pocketed"]:
+                out.append("Cue ball goes in the pocket: scratch.")
+            else:
+                r = f", after {m['rails']} rail{'s' if m['rails'] != 1 else ''}" if m["rails"] else ""
+                out.append(f"Cue ball finishes {_zone(sess, m['end'], R)}{r}.")
+        elif m["pocketed"]:
+            out.append(f"{m['id']} ({m['label']}) is pocketed in the {_pocket_name(sess, m['pocket'])}.")
+        else:
+            verb = "is hit first and finishes" if m["id"] == first else "gets knocked to"
+            out.append(f"{m['id']} ({m['label']}) {verb} {_zone(sess, m['end'], R)}.")
+    return out
+
+
+def _best_speed_offense(sess, o, R, cue):
+    ghost = np.array(o["ghost"], float)
+    ball = np.array(o["ball"], float)
+    pk = np.array(o["pocket"], float)
+    cue_c = np.array(cue.center, float)
+    d1 = float(np.linalg.norm(ghost - cue_c))
+    d2 = float(np.linalg.norm(pk - ball))
+    cos = max(0.25, float(np.dot(_unit(ghost - cue_c), _unit(pk - ball))))
+    vo = math.sqrt(2 * A_ROLL * d2 * 1.35)
+    vc = vo / (0.98 * cos)
+    return min(V_MAX, math.sqrt(vc * vc + 2 * A_ROLL * d1))
+
+
+def _pos_score(sess, end, R):
+    """Higher = cue ball ends somewhere comfortable: off the rail, away from pockets."""
+    x0, y0, x1, y1 = _bounds(sess, R)
+    rail = min(end[0] - x0, x1 - end[0], end[1] - y0, y1 - end[1])
+    pk = min(math.hypot(end[0] - p[0], end[1] - p[1]) for p in sess.pockets)
+    return 0.5 * min(1.0, rail / (4 * R)) + 0.5 * min(1.0, pk / (6 * R))
+
+
+def _sim_offense(sess, o, R, cue, group, only8):
+    v0 = _best_speed_offense(sess, o, R, cue)
+    best = None
+    for name, spin in (("follow", 0.35), ("stun", 0.0), ("draw", -0.3)):
+        s = simulate(sess, np.array(o["ghost"]) - np.array(cue.center), v0, spin)
+        if s["cue_scratch"] or s["first"] != o["target"]:
+            continue
+        pot = [m for m in s["moves"] if m["pocketed"] and m["label"] != "cue"]
+        if not any(m["id"] == o["target"] for m in pot):
+            continue
+        bad = [m for m in pot if not _legal_pot(m["label"], group, only8)]
+        cm = next(m for m in s["moves"] if m["label"] == "cue")
+        score = _pos_score(sess, cm["end"], R) - (0.6 if bad else 0.0) + 0.1 * (len(pot) - 1 - len(bad) > 0)
+        if best is None or score > best[0]:
+            best = (score, name, s, v0)
+    return best
+
+
+def _legal_pot(label, group, only8):
+    if only8:
+        return label == "eight"
+    return label != "eight" and (group == "open" or label == group)
+
+
+def _score_defense(sess, s, target, group, only8, R):
+    cm = next(m for m in s["moves"] if m["label"] == "cue")
+    opp = [b for b in sess.balls if b.label not in ("cue", "unknown") and not _legal(b, group, only8) and b.id != target
+           and not any(m["id"] == b.id and m["pocketed"] for m in s["moves"])]
+    if group == "open":
+        opp = [b for b in opp if b.label != "eight"]
+    final = []
+    for b in sess.balls:
+        mv = next((m for m in s["moves"] if m["id"] == b.id), None)
+        if mv and mv["pocketed"]:
+            continue
+        c = np.array(mv["end"] if mv else b.center, float)
+        final.append((b, c))
+    cue_end = np.array(cm["end"], float)
+    blocked = 0
+    for b in opp:
+        c = np.array(next(m["end"] for m in s["moves"] if m["id"] == b.id) if any(m["id"] == b.id for m in s["moves"]) else b.center, float)
+        clear = True
+        d = c - cue_end
+        L = float(np.linalg.norm(d)) or 1.0
+        u = d / L
+        for bb, cc in final:
+            if bb.id in (b.id, "CUE") or bb.label == "cue":
+                continue
+            t = float(np.dot(cc - cue_end, u))
+            if 0 < t < L and float(np.linalg.norm(cue_end + u * t - cc)) < 1.9 * R:
+                clear = False
+                break
+        blocked += 0 if clear else 1
+    frac = blocked / len(opp) if opp else 0.0
+    x0, y0, x1, y1 = _bounds(sess, R)
+    diag = math.hypot(x1 - x0, y1 - y0)
+    dist_n = float(np.mean([math.hypot(*(cue_end - np.array(b.center))) for b in opp])) / diag if opp else 0.5
+    oe = next((np.array(m["end"]) for m in s["moves"] if m["id"] == target), np.array([x0, y0]))
+    rail = min(oe[0] - x0, x1 - oe[0], oe[1] - y0, y1 - oe[1]) < 3 * R
+    return 0.6 * frac + 0.3 * min(1.0, dist_n * 2.0) + 0.1 * (1.0 if rail else 0.0), frac
+
+
+def _sim_defense(sess, o, R, cue, group, only8):
+    ghost = np.array(o["ghost"], float)
+    ball = np.array(o["ball"], float)
+    oe = np.array(o["object_end"], float)
+    cue_c = np.array(cue.center, float)
+    d1 = float(np.linalg.norm(ghost - cue_c))
+    d2 = float(np.linalg.norm(oe - ball))
+    nrm = _unit(oe - ball)
+    cos = max(0.25, float(np.dot(_unit(ghost - cue_c), nrm)))
+    vo = math.sqrt(2 * A_ROLL * d2)
+    v0 = min(V_MAX, math.sqrt((vo / (0.98 * cos)) ** 2 + 2 * A_ROLL * d1))
+    s = simulate(sess, ghost - cue_c, v0, 0.0)
+    if s["cue_scratch"] or s["first"] != o["target"]:
+        return None
+    if any(m["pocketed"] and not _legal_pot(m["label"], group, only8) for m in s["moves"] if m["label"] != "cue"):
+        return None
+    score, frac = _score_defense(sess, s, o["target"], group, only8, R)
+    return score, frac, s
+
+
 def _describe(o: dict) -> str:
     if o["kind"] == "offense":
         ph = o.get("physics") or {}
@@ -822,6 +1113,8 @@ def _describe(o: dict) -> str:
         bits = [f"Pot {o['target']} ({o['target_label']})"]
         if cut is not None:
             bits.append(f"about {cut:.0f}° cut {ph.get('cut_direction', '')}")
+        if o.get("spin"):
+            bits.append(f"{o['spin']} on the cue ball")
         if ph.get("force"):
             bits.append(f"{ph['force']['category']} speed")
         return ", ".join(bits)
@@ -830,22 +1123,46 @@ def _describe(o: dict) -> str:
 
 
 def top_shots(sess: Session, group: str = "open", n: int = 3) -> list[dict]:
-    """Best n options overall, always including at least one safety when one exists."""
+    """Best n options overall (each replayed by the simulator), always including a safety when one exists."""
     group = group if group in ("open", "solid", "stripe") else "open"
-    off, de = _offense(sess, group), _defense(sess, group)
+    only8 = _group_cleared(sess, group)
+    cue = next((b for b in sess.balls if b.label == "cue"), None)
+    if cue is None or len(sess.pockets) < 3:
+        return []
+    R = float(np.median([b.radius for b in sess.balls]))
+    off, de = [], []
+    for o in _offense(sess, group)[:8]:
+        r = _sim_offense(sess, o, R, cue, group, only8)
+        if not r:
+            continue
+        score, spin, s, v0 = r
+        o["sim"], o["spin"], o["raw"] = s, {"follow": "follow", "stun": "", "draw": "draw"}[spin], o["raw"] * (0.7 + 0.3 * score)
+        o["speed"] = round(v0, 1)
+        off.append(o)
+    for o in _defense(sess, group)[:6]:
+        r = _sim_defense(sess, o, R, cue, group, only8)
+        if not r:
+            continue
+        score, frac, s = r
+        o["sim"], o["raw"] = s, score
+        o["blocked"] = f"{int(round(frac * 100))}% of opponent lines blocked"
+        de.append(o)
     omax = max([o["raw"] for o in off], default=1.0) or 1.0
     dmax = max([o["raw"] for o in de], default=1.0) or 1.0
     for o in off:
-        o["rating"] = round(100 * o["raw"] / omax * 0.95, 1)   # a clean pot is the baseline
+        o["rating"] = round(float(100 * o["raw"] / omax * 0.95), 1)
     for o in de:
         o["rating"] = round(100 * min(1.0, o["raw"] / max(dmax, 0.5)) * 0.8, 1)
     pool = sorted(off + de, key=lambda o: -o["rating"])
     chosen = pool[:n]
     if de and not any(o["kind"] == "defense" for o in chosen):
-        chosen = chosen[:n - 1] + [de[0]]
+        chosen = chosen[:n - 1] + [sorted(de, key=lambda o: -o["rating"])[0]]
     chosen.sort(key=lambda o: -o["rating"])
     for i, o in enumerate(chosen, 1):
         o["rank"] = i
         o["summary"] = _describe(o)
+        o["effects"] = _effects(sess, o["sim"], R)
+        o["legend"] = [{"id": m["id"], "label": m["label"], "pocketed": m["pocketed"]} for m in o["sim"]["moves"]]
         o.pop("raw", None)
     return chosen
+

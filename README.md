@@ -15,3 +15,9 @@ Deploy on Railway: connect the repo; the `Dockerfile` and `railway.json` are pic
 **Tap to place.** If detection is off (or fails), open **Tap to place** and tap the pockets and balls on your photo. Each tap adds a row; choose what it is from the dropdown (Pocket 1-6, cue ball, solids 1-7, 8-ball, stripes 9-15, or "number unknown"). You need at least the four corner pockets; the middle pockets are derived if you skip them. Taps are snapped to the real ball centres, your labels are kept through later review rounds, and **Start from detected** pre-fills the list from the automatic result.
 
 Detection is heuristic (felt colour + Hough circles + colour blobs). Ratings and speed/spin numbers are estimates.
+
+## Shot effects and your group
+
+- Choose **Open table / Solids / Stripes** in the review step or on the results page; changing it re-ranks the options immediately.
+- Each option is replayed by a small physics simulator (ball-ball collisions, cushion bounces, rolling friction, pockets, cue-ball follow/draw). The overlay draws a **dotted line** for every ball that moves and a **dotted circle** where it stops (`IN` = pocketed). The card lists the effects in words (where the cue ball ends up, which balls are knocked where). Shots that scratch or fail to pot are dropped.
+- The simulator uses estimated constants, so treat paths as a guide, not a guarantee.

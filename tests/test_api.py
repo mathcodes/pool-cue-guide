@@ -152,3 +152,30 @@ def test_prefill_round_trip():
     assert sum(i["kind"].startswith("pocket") for i in items) == 6 and len(items) == 21
     j = c.post(f"/api/sessions/{sid}/manual", json={"items": items}).json()
     assert j["mode"] == "manual" and len(j["balls"]) == 15
+
+
+def test_shots_are_simulated_and_group_changes_ranking():
+    from cueguide import engine as e
+    s = e.analyze(open("tests/fixtures/game_table.jpg", "rb").read())
+    for g in ("open", "solid", "stripe"):
+        opts = e.top_shots(s, g)
+        assert opts and any(o["kind"] == "defense" for o in opts)
+        for o in opts:
+            sim = o["sim"]
+            assert sim["moves"][0]["label"] == "cue" and not sim["cue_scratch"]
+            assert sim["first"] == o["target"] and o["effects"]
+            if o["kind"] == "offense":
+                assert any(m["id"] == o["target"] and m["pocketed"] for m in sim["moves"])
+            assert e.overlay_png(s, o)[:4] == b"\x89PNG"
+    solids = {o["target_label"] for o in e.top_shots(s, "solid") if o["kind"] == "offense"}
+    assert solids <= {"solid"}
+
+
+def test_simulate_cushion_and_friction():
+    from cueguide import engine as e
+    s = e.analyze(open("tests/fixtures/game_table.jpg", "rb").read())
+    cue = next(b for b in s.balls if b.label == "cue")
+    soft = e.simulate(s, (1, 0), 3.0)["moves"]
+    assert soft[0]["rails"] == 0
+    hard = e.simulate(s, (0, -1), 22.0)["moves"][0]
+    assert hard["rails"] >= 1 or hard["pocketed"]

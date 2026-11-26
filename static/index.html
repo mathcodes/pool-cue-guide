@@ -41,6 +41,11 @@ td input[type=checkbox]{width:20px;height:20px}
 .opt.on{border-color:var(--acc)}
 #drop{border:2px dashed var(--line);border-radius:12px;padding:28px;text-align:center}
 .plist{max-height:340px;overflow:auto}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.seg button{border:0;border-radius:0;background:transparent;color:inherit;padding:9px 14px;cursor:pointer;font:inherit}
+.seg button[aria-checked=true]{background:#22c55e;color:#04210f;font-weight:700}
+.dots{letter-spacing:3px;font-weight:700}.ring{display:inline-block;width:12px;height:12px;border:2px dotted currentColor;border-radius:50%;vertical-align:-2px}
+.fx{margin:6px 0 0;padding-left:18px}.fx li{margin:2px 0}
 </style>
 </head>
 <body>
@@ -92,9 +97,7 @@ td input[type=checkbox]{width:20px;height:20px}
       <details style="margin-top:8px"><summary class="mut">All detected balls</summary><div id="all" class="row" style="margin-top:8px"></div></details>
       <hr style="border:0;border-top:1px solid var(--line);margin:14px 0">
       <div class="row">
-        <label class="mut">Your group
-          <select id="group"><option value="open">Open table</option><option value="solid">Solids</option><option value="stripe">Stripes</option></select>
-        </label>
+        <div><div class="mut" style="margin-bottom:4px">Which balls are yours?</div><div class="seg" id="seg1" role="radiogroup" aria-label="Your group"></div></div>
         <button id="approve">Approved ✔</button>
       </div>
       <p id="aerr" class="err" role="alert"></p>
@@ -118,6 +121,8 @@ td input[type=checkbox]{width:20px;height:20px}
 
 <section class="panel" id="results" hidden>
   <h2 style="margin:0 0 6px;font-size:17px">Your 3 best options</h2>
+  <div class="mut" style="margin-bottom:4px">You are shooting:</div><div class="seg" id="seg2" role="radiogroup" aria-label="Your group"></div>
+  <p class="mut" style="margin:10px 0"><span class="dots">&middot;&middot;&middot;&middot;</span> dotted line = where a ball travels &nbsp; <span class="ring"></span> dotted circle = where it stops (IN = pocketed)</p>
   <div id="opts"></div>
   <p class="mut">Ratings are heuristic. Speed, spin and safety quality are estimates, not measurements.</p>
   <button class="sec" id="back">Back to review</button>
@@ -126,6 +131,8 @@ td input[type=checkbox]{width:20px;height:20px}
 
 <script>
 const $=s=>document.querySelector(s);
+let grp='open';
+const SEGS=[['open','Open table'],['solid','Solids (1–7)'],['stripe','Stripes (9–15)']];
 let sid=null, st=null, entries=new Map(), opt=0, opts=[];
 let pts=[], sel=-1, view='auto';
 
@@ -170,7 +177,7 @@ function refresh(){
   if(st.mode==='none')return;
   const pick=[...entries.keys()].join(',');
   $('#base').src=`/api/sessions/${sid}/image.png?r=${st.round}&m=${st.mode}`;
-  $('#ov').src=`/api/sessions/${sid}/overlay.png?r=${st.round}&m=${st.mode}&option=${opt}&pick=${encodeURIComponent(pick)}`;
+  $('#ov').src=`/api/sessions/${sid}/overlay.png?r=${st.round}&m=${st.mode}&option=${opt}&g=${grp}&t=${opts.length?opts[0].summary.length:0}&pick=${encodeURIComponent(pick)}`;
 }
 function show(){
   const notes={markers:'✔ Using the green pocket markers as the table outline ('+st.pockets+' pockets).',
@@ -229,15 +236,28 @@ async function rerun(find){
 }
 $('#rerun').onclick=()=>rerun(false);
 $('#missing').onclick=()=>rerun(true);
-$('#approve').onclick=async()=>{
+function drawSegs(){
+  for(const id of ['#seg1','#seg2']){
+    const el=$(id);el.innerHTML='';
+    SEGS.forEach(([k,l])=>{
+      const b=document.createElement('button');b.type='button';b.textContent=l;b.setAttribute('role','radio');
+      b.setAttribute('aria-checked',grp===k);
+      b.onclick=()=>{grp=k;drawSegs();if(!$('#results').hidden)approve(true)};
+      el.append(b);
+    });
+  }
+}
+async function approve(stay){
   $('#aerr').textContent='';
   try{
-    const j=await post('approve',{group:$('#group').value});
+    const j=await post('approve',{group:grp});
     st=j;opts=j.options;opt=opts.length?1:0;
     $('#review').hidden=true;$('#results').hidden=false;$('#stagehint').hidden=true;drawOpts();refresh();
-    $('#stage').scrollIntoView({behavior:'smooth'});
+    if(!stay)$('#stage').scrollIntoView({behavior:'smooth'});
   }catch(e){$('#aerr').textContent=e.message}
-};
+}
+$('#approve').onclick=()=>approve(false);
+drawSegs();
 function drawOpts(){
   $('#results').insertBefore($('#leftpanel'),$('#opts'));
   $('#tabAuto').parentElement.hidden=true;
@@ -245,7 +265,7 @@ function drawOpts(){
   if(!opts.length)box.innerHTML='<p class="mut">No clear shot found. Try Back to review and fix any wrong balls.</p>';
   opts.forEach((o,i)=>{
     const d=document.createElement('div');d.className='opt'+(opt===i+1?' on':'');d.tabIndex=0;
-    d.innerHTML=`<b>#${o.rank} ${o.kind==='defense'?'🛡 Safety':'🎯 Pot'}</b> <span class="chip">rating ${o.rating}</span><div>${o.summary}</div>`;
+    d.innerHTML=`<b>#${o.rank} ${o.kind==='defense'?'🛡 Safety':'🎯 Pot'}</b> <span class="chip">rating ${o.rating}</span><div>${o.summary}</div>${(o.effects&&o.effects.length)?'<ul class="fx">'+o.effects.map(x=>'<li>'+x+'</li>').join('')+'</ul>':''}`;
     const pick=()=>{opt=i+1;drawOpts();refresh()};
     d.onclick=pick;d.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();pick()}};
     box.append(d);
