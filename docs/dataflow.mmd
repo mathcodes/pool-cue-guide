@@ -1,0 +1,69 @@
+flowchart TD
+  classDef step fill:#e8f5e9,stroke:#2e7d32,color:#111
+  classDef alt fill:#fff8e1,stroke:#ef6c00,color:#111
+  classDef store fill:#f3e5f5,stroke:#6a1b9a,color:#111
+  classDef data fill:#eceff1,stroke:#455a64,color:#111
+
+  S1(["1 Choose an input<br/>Upload photo, Random or Rails"]):::step
+
+  subgraph T["Build the table model"]
+    S2["2 Decode and downscale<br/>POST /api/sessions<br/>decode_image"]:::step
+    S3["3 Find and flatten the table<br/>analyze_src<br/>markers or auto, homography H"]:::step
+    S4["4 Detect and label balls<br/>Hough, blobs, classify, ids<br/>creates the Session"]:::step
+    S5["5 Random practice table<br/>POST /api/random<br/>randomtable.make"]:::alt
+    S6["6 Tap to place<br/>POST /sessions/id/manual<br/>build_manual"]:::alt
+  end
+
+  subgraph R["Check the layout"]
+    S7["7 Render the picture<br/>GET image.png, overlay.png<br/>overlay_png, render_base"]:::step
+    S8["8 Review loop<br/>POST /sessions/id/review<br/>refine"]:::step
+  end
+
+  subgraph E["Work out the shots"]
+    S9["9 Approve with a group<br/>POST /sessions/id/approve<br/>top_shots"]:::step
+    S10["10 Candidates<br/>_offense and _defense"]:::step
+    S11["11 Simulate every candidate<br/>simulate"]:::step
+    S12["12 Score and select the top 3<br/>ratings, effects, cut diagram data"]:::step
+  end
+
+  subgraph P["Show and play"]
+    S13["13 Present the options<br/>cards, cut diagrams, dotted overlay"]:::step
+    S14["14 Shoot or Undo<br/>POST /sessions/id/play and /undo<br/>play, undo"]:::step
+  end
+
+  SES[("SESSIONS<br/>one Session per id<br/>45 minute TTL")]:::store
+  OPT[("OPTIONS and GROUPS<br/>last 3 options and group")]:::store
+  TPL[/"cueguide/assets/<br/>table_template.png"/]:::data
+  RAILS["R Rails viewer<br/>GET /api/rails"]:::alt
+  RJ[/"cueguide/data/<br/>rail_shots.json"/]:::data
+
+  S1 -- "photo up to 12 MB" --> S2
+  S2 -- "BGR image, longest side 1600 px" --> S3
+  S3 -- "rect, mask, pockets, H" --> S4
+  S3 -. "detection fails: photo only" .-> S6
+  S1 -- "Random button" --> S5
+  TPL --> S5
+  S5 -- "pocket and ball taps" --> S6
+  S4 -- "balls with ids and labels" --> S7
+  S6 -- "balls, pockets, locked labels" --> S7
+  S7 -- "picture and transparent PNG" --> S8
+  S8 -- "improve, remove, find_missing" --> S7
+  S8 -- "Approved and group" --> S9
+  S9 --> S10
+  S10 -- "ranked candidates" --> S11
+  S11 -- "paths, contacts, end positions" --> S12
+  S12 -- "3 options" --> S13
+  S13 -- "option number" --> S14
+  S14 -- "new layout, re-rank" --> S10
+  S1 -- "Rails button" --> RAILS
+  RJ --> RAILS
+
+  S4 -. "creates" .-> SES
+  S6 -. "rebuilds" .-> SES
+  S8 -. "updates balls" .-> SES
+  S14 -. "moves balls, pushes undo snapshot" .-> SES
+  SES -. "read" .-> S7
+  SES -. "read" .-> S10
+  S9 -. "stores group" .-> OPT
+  S12 -. "stores options" .-> OPT
+  OPT -. "read" .-> S14
