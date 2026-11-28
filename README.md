@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🎱 Pool Cue Guide
+# 🎱 Pool Shot Guide
 
 **Upload a photo of a pool table (or generate a random one) and get the three best shots, with every ball's movement simulated and drawn.**
 
